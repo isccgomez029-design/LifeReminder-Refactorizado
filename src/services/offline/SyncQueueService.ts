@@ -1,6 +1,4 @@
 // src/services/offline/SyncQueueService.ts
-// 🔄 Servicio ÚNICO de sincronización offline-first
-// ✅ CORREGIDO: Preserva items archivados en cache
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo, { NetInfoState } from "@react-native-community/netinfo";
@@ -94,6 +92,56 @@ function log(message: string, data?: any) {
 
 function getCacheKey(collectionName: string, userId: string): string {
   return `${STORAGE_PREFIX}/${userId}/${collectionName}`;
+}
+
+/**
+ * ✅ FIX DE RAÍZ:
+ * Normaliza fechas para AsyncStorage (JSON).
+ * Convierte:
+ * - Firestore Timestamp -> ISO string
+ * - {seconds, nanoseconds} -> ISO string
+ * - Date -> ISO string
+ * Y recorre objetos/arreglos recursivamente.
+ */
+function normalizeForStorage(value: any): any {
+  if (value === null || value === undefined) return value;
+
+  // Firestore Timestamp
+  if (typeof value?.toDate === "function") {
+    try {
+      const d = value.toDate();
+      return d instanceof Date ? d.toISOString() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Timestamp ya serializado {seconds, nanoseconds}
+  if (typeof value?.seconds === "number") {
+    const d = new Date(value.seconds * 1000);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
+  // Date
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  // Array
+  if (Array.isArray(value)) {
+    return value.map(normalizeForStorage);
+  }
+
+  // Object
+  if (typeof value === "object") {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = normalizeForStorage(v);
+    }
+    return out;
+  }
+
+  return value;
 }
 
 // ============================================================
@@ -416,12 +464,9 @@ async function forceSync(): Promise<{ success: number; failed: number }> {
 }
 
 // ============================================================
-//              CACHE MANAGEMENT (CORREGIDO)
+//              CACHE MANAGEMENT (CORREGIDO + FIX FECHAS)
 // ============================================================
 
-/**
- * ✅ CORREGIDO: Guarda datos en cache PRESERVANDO items archivados
- */
 async function saveToCache(
   collectionName: string,
   userId: string,
@@ -457,7 +502,6 @@ async function saveToCache(
     const finalData: Array<Record<string, any>> = [];
     const processedIds = new Set<string>();
 
-    // ✅ CAMPOS QUE DEBEN PRESERVARSE LOCALMENTE
     const PRESERVE_FIELDS = [
       "currentAlarmId",
       "scheduledAlarmIds",
@@ -466,31 +510,24 @@ async function saveToCache(
       "lastSnoozeAt",
     ];
 
-    // Procesar datos remotos
     for (const item of dataWithIds) {
       const pendingOp = pendingMap.get(item.id);
 
-      // Solo excluir DELETE pendientes
       if (pendingOp?.type === "DELETE") {
         processedIds.add(item.id);
         continue;
       }
 
-      // ✅ NUEVO: Obtener datos locales actuales del item
       const localItem = currentData.find((d: any) => d.id === item.id);
 
-      let mergedItem = { ...item };
+      let mergedItem: Record<string, any> = { ...item };
 
-      // Si hay operación UPDATE pendiente, aplicar cambios
       if (pendingOp?.type === "UPDATE") {
         mergedItem = { ...mergedItem, ...pendingOp.payload };
       }
 
-      // ✅ CRÍTICO: Preservar campos de alarma locales si existen
-      // Esto evita que Firestore sobrescriba alarmas programadas localmente
       if (localItem) {
         for (const field of PRESERVE_FIELDS) {
-          // Si el campo existe localmente y NO viene en el UPDATE remoto
           if (
             localItem[field] !== undefined &&
             localItem[field] !== null &&
@@ -501,20 +538,19 @@ async function saveToCache(
         }
       }
 
-      finalData.push(mergedItem);
+      // ✅ Normalizar fechas/objetos antes de guardar
+      finalData.push(normalizeForStorage(mergedItem));
       processedIds.add(item.id);
     }
 
-    // Agregar items CREATE pendientes
     for (const [docId, op] of pendingMap) {
       if (op.type === "CREATE" && !processedIds.has(docId)) {
-        finalData.push({ id: docId, ...op.payload });
+        finalData.push(normalizeForStorage({ id: docId, ...op.payload }));
         processedIds.add(docId);
       }
     }
 
-    // Preservar items archivados del cache actual
-    for (const item of currentData) {
+    for (const item of currentData as any[]) {
       const itemId = item.id as string;
       if (!processedIds.has(itemId)) {
         if (
@@ -522,7 +558,7 @@ async function saveToCache(
           !!item.archivedAt ||
           itemId?.startsWith("temp_")
         ) {
-          finalData.push(item);
+          finalData.push(normalizeForStorage(item));
           processedIds.add(itemId);
         }
       }
@@ -543,6 +579,7 @@ async function saveToCache(
     log(`❌ Error guardando cache:`, error);
   }
 }
+
 async function getFromCache<T = Record<string, any>>(
   collectionName: string,
   userId: string
@@ -574,6 +611,8 @@ async function addItemToCache(
       return;
     }
 
+    item = normalizeForStorage(item);
+
     const cached = await getFromCache(collectionName, userId);
     const currentData = cached?.data || [];
 
@@ -601,9 +640,6 @@ async function addItemToCache(
   }
 }
 
-/**
- * ✅ CORREGIDO: Actualiza un item en cache de forma robusta
- */
 async function updateItemInCache(
   collectionName: string,
   userId: string,
@@ -611,13 +647,14 @@ async function updateItemInCache(
   updates: Record<string, any>
 ): Promise<void> {
   try {
+    updates = normalizeForStorage(updates);
+
     const cached = await getFromCache(collectionName, userId);
 
     if (!cached || !cached.data) {
-      // Si no hay cache, crear uno con el item
       const key = getCacheKey(collectionName, userId);
       const cacheData: CachedCollection = {
-        data: [{ id: docId, ...updates }],
+        data: [normalizeForStorage({ id: docId, ...updates })],
         cachedAt: Date.now(),
         lastSyncedAt: Date.now(),
       };
@@ -630,13 +667,18 @@ async function updateItemInCache(
 
     let updatedData: Array<Record<string, any>>;
     if (itemIndex >= 0) {
-      // ✅ Actualizar item existente
       updatedData = [...cached.data];
-      updatedData[itemIndex] = { ...updatedData[itemIndex], ...updates };
+      updatedData[itemIndex] = {
+        ...updatedData[itemIndex],
+        ...updates,
+      };
+      updatedData[itemIndex] = normalizeForStorage(updatedData[itemIndex]);
       log(`✏️ Actualizado existente: ${collectionName}/${docId}`);
     } else {
-      // ✅ Agregar nuevo item si no existe
-      updatedData = [...cached.data, { id: docId, ...updates }];
+      updatedData = [
+        ...cached.data,
+        normalizeForStorage({ id: docId, ...updates }),
+      ];
       log(`✏️ Agregado nuevo: ${collectionName}/${docId}`);
     }
 
@@ -686,7 +728,7 @@ async function getItemFromCache(
     const cached = await getFromCache(collectionName, userId);
     if (!cached) return null;
 
-    return cached.data.find((item: any) => item.id === docId) || null;
+    return (cached.data as any).find((item: any) => item.id === docId) || null;
   } catch (error) {
     log(`❌ Error obteniendo item:`, error);
     return null;
@@ -740,7 +782,7 @@ async function debugCache(userId: string): Promise<void> {
     for (const collectionName of AUTO_SYNC_COLLECTIONS) {
       const cached = await getFromCache(collectionName, userId);
       if (cached && cached.data.length > 0) {
-        const archivedCount = cached.data.filter(
+        const archivedCount = (cached.data as any).filter(
           (item: any) => item.isArchived === true || !!item.archivedAt
         ).length;
         const activeCount = cached.data.length - archivedCount;
@@ -761,17 +803,59 @@ async function debugCache(userId: string): Promise<void> {
 }
 
 // ============================================================
-//    SINCRONIZACIÓN (reemplaza OfflineDataManager)
+// ✅ NUEVO: MIGRAR NAMESPACE (tempUid -> realUid)
 // ============================================================
 
-/**
- * Sincroniza una colección desde Firebase
- */
+async function migrateUserNamespace(
+  oldUid: string,
+  newUid: string
+): Promise<void> {
+  if (!oldUid || !newUid || oldUid === newUid) return;
+
+  try {
+    log(`🧬 Migrando namespace: ${oldUid} -> ${newUid}`);
+
+    const allKeys = await AsyncStorage.getAllKeys();
+    const oldPrefix = `${STORAGE_PREFIX}/${oldUid}/`;
+    const oldKeys = allKeys.filter((k) => k.startsWith(oldPrefix));
+
+    for (const key of oldKeys) {
+      const value = await AsyncStorage.getItem(key);
+      if (value == null) continue;
+
+      const newKey = key.replace(
+        `${STORAGE_PREFIX}/${oldUid}/`,
+        `${STORAGE_PREFIX}/${newUid}/`
+      );
+      await AsyncStorage.setItem(newKey, value);
+      await AsyncStorage.removeItem(key);
+    }
+
+    log(`✅ Cache migrado: ${oldKeys.length} keys`);
+
+    const queue = await getQueue();
+    const updated = queue.map((item) => {
+      if (item.userId === oldUid) {
+        return { ...item, userId: newUid };
+      }
+      return item;
+    });
+
+    await saveQueue(updated);
+    log("✅ Cola migrada");
+  } catch (err: any) {
+    log("❌ migrateUserNamespace error:", err?.message);
+  }
+}
+
+// ============================================================
+//    SINCRONIZACIÓN
+// ============================================================
+
 async function syncCollection(
   collectionName: string,
   userId: string
 ): Promise<any[]> {
-  // Verificar conexión
   const netState = await NetInfo.fetch();
   isOnline =
     netState.isConnected === true && netState.isInternetReachable !== false;
@@ -793,12 +877,10 @@ async function syncCollection(
       ...doc.data(),
     }));
 
-    // ✅ Guardar en cache (ahora preserva operaciones pendientes Y archivados)
     await saveToCache(collectionName, userId, data);
 
     log(`✅ ${collectionName}: ${data.length} docs`);
 
-    // Retornar datos del cache para incluir operaciones pendientes
     const cached = await getFromCache(collectionName, userId);
     return cached?.data || data;
   } catch (error) {
@@ -808,9 +890,6 @@ async function syncCollection(
   }
 }
 
-/**
- * Sincroniza todas las colecciones del usuario
- */
 async function syncAllCollections(userId: string): Promise<void> {
   log("🔄 Sincronizando todas las colecciones...");
 
@@ -895,16 +974,11 @@ async function getExcludedIds(
     if (op.type === "DELETE") {
       excluded.add(op.documentId);
     }
-    // ✅ CORREGIDO: NO excluir archivados de la lista general
-    // Solo excluir de la vista principal, no del cache
   });
 
   return excluded;
 }
 
-/**
- * ✅ NUEVO: Obtener IDs archivados para filtrar en vistas
- */
 async function getArchivedIds(
   collectionName: string,
   userId: string
@@ -920,7 +994,6 @@ async function getArchivedIds(
     });
   }
 
-  // También incluir los que tienen UPDATE pendiente con isArchived
   const queue = await getQueue();
   queue.forEach((op) => {
     if (op.collection !== collectionName || op.userId !== userId) return;
@@ -933,9 +1006,6 @@ async function getArchivedIds(
   return archived;
 }
 
-/**
- * ✅ NUEVO: Obtener solo items activos (no archivados)
- */
 async function getActiveItems(
   collectionName: string,
   userId: string
@@ -954,9 +1024,6 @@ async function getActiveItems(
   });
 }
 
-/**
- * ✅ NUEVO: Obtener solo items archivados
- */
 async function getArchivedItems(
   collectionName: string,
   userId: string
@@ -968,6 +1035,7 @@ async function getArchivedItems(
     return item.isArchived === true || !!item.archivedAt;
   });
 }
+
 function getIsOnline(): boolean {
   return isOnline;
 }
@@ -983,14 +1051,11 @@ async function checkConnection(): Promise<boolean> {
 // ============================================================
 
 export const syncQueueService = {
-  // Inicialización
   initialize,
   destroy,
 
-  // Listeners
   addListener,
 
-  // Queue
   getQueue,
   enqueue,
   getPendingCount,
@@ -1000,7 +1065,6 @@ export const syncQueueService = {
   clearQueue,
   forceSync,
 
-  // Cache
   saveToCache,
   getFromCache,
   addItemToCache,
@@ -1012,16 +1076,13 @@ export const syncQueueService = {
   hasCachedData,
   debugCache,
 
-  // ✅ NUEVO: Funciones para obtener items filtrados
   getActiveItems,
   getArchivedItems,
   getArchivedIds,
 
-  // Sincronización
   syncCollection,
   syncAllCollections,
 
-  // Aliases
   saveLocalData,
   getLocalData,
   getAllLocalData,
@@ -1030,11 +1091,13 @@ export const syncQueueService = {
   deleteCacheItem,
   addToCacheItem,
 
-  // Utilidades
   hasPendingOperations,
   getExcludedIds,
   getIsOnline,
   checkConnection,
+
+  // ✅ NUEVO
+  migrateUserNamespace,
 };
 
 export default syncQueueService;

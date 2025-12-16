@@ -1,7 +1,8 @@
 // src/screens/auth/LoginScreen.tsx
-// ✅ Actualizado: Soporte para inicio de sesión offline
+// ✅ Limpio: sin NetInfo, sin listeners, sin Firebase, sin validaciones locales
+// La lógica vive en OfflineAuthService + OfflineContext
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   View,
   Text,
@@ -18,14 +19,12 @@ import { StackNavigationProp } from "@react-navigation/stack";
 import { RootStackParamList } from "../../navigation/StackNavigator";
 import { LoginFormData, COLORS, FONT_SIZES } from "../../../types/index";
 import { MaterialIcons } from "@expo/vector-icons";
-import NetInfo from "@react-native-community/netinfo";
 
-// 🔹 Servicio de autenticación offline
+// 🔹 Estado de conectividad global (ya existe en tu app)
+import { useIsOnline } from "../../context/OfflineContext";
+
+// 🔹 Servicio de autenticación offline-first
 import { offlineAuthService } from "../../services/offline/OfflineAuthService";
-
-// 🔹 Firebase Auth (para compatibilidad)
-import { auth } from "../../config/firebaseConfig";
-import { onAuthStateChanged } from "firebase/auth";
 
 const loginImage = require("../../../assets/login_image.png");
 
@@ -39,103 +38,25 @@ interface LoginScreenProps {
 }
 
 const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
+  const isOnline = useIsOnline();
+
   const [formData, setFormData] = useState<LoginFormData>({
     username: "",
     password: "",
   });
+
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isCheckingSession, setIsCheckingSession] = useState<boolean>(true);
-  const [isOnline, setIsOnline] = useState<boolean>(true);
-  const [cachedEmail, setCachedEmail] = useState<string | null>(null);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const initAuth = async () => {
-      try {
-        const netState = await NetInfo.fetch();
-        setIsOnline(
-          netState.isConnected === true &&
-            netState.isInternetReachable !== false
-        );
-
-        const cachedUser = await offlineAuthService.initialize();
-
-        if (!isMounted) return;
-
-        if (cachedUser) {
-          console.log("✅ Sesión restaurada (offline):", cachedUser.email);
-          setCachedEmail(cachedUser.email);
-        } else {
-          const cached = await offlineAuthService.getCachedUser();
-          if (cached?.email) setCachedEmail(cached.email);
-        }
-      } catch (error) {
-        console.log("Error inicializando auth:", error);
-      } finally {
-        if (isMounted) setIsCheckingSession(false);
-      }
-    };
-
-    initAuth();
-
-    const unsub = onAuthStateChanged(auth, (user) => {
-      if (user && isMounted) {
-        console.log("🔐 Firebase tiene sesión activa:", user.email);
-      }
-    });
-
-    const netUnsub = NetInfo.addEventListener((state) => {
-      setIsOnline(
-        state.isConnected === true && state.isInternetReachable !== false
-      );
-    });
-
-    return () => {
-      isMounted = false;
-      unsub();
-      netUnsub();
-    };
-  }, [navigation]);
 
   const updateFormData = (field: keyof LoginFormData, value: string): void => {
     setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
-  const validateForm = (): boolean => {
-    if (!formData.username.trim()) {
-      Alert.alert("Error", "Por favor, ingresa tu correo");
-      return false;
-    }
-    const email = formData.username.trim();
-    if (!/^\S+@\S+\.\S+$/.test(email)) {
-      Alert.alert("Error", "El formato del correo no es válido");
-      return false;
-    }
-    if (!formData.password.trim()) {
-      Alert.alert("Error", "Por favor, ingresa tu contraseña");
-      return false;
-    }
-    if (formData.password.length < 6) {
-      Alert.alert("Error", "La contraseña debe tener al menos 6 caracteres");
-      return false;
-    }
-    return true;
-  };
-
-  const handleLogin = (): void => {
-    if (!validateForm()) return;
-
-    // ✅ No bloqueamos por estar offline: el servicio decide si hay cache suficiente.
-    authenticateUser();
-  };
-
-  const authenticateUser = async (): Promise<void> => {
+  const handleLogin = async (): Promise<void> => {
     try {
       setIsLoading(true);
 
       const result = await offlineAuthService.signIn(
-        formData.username.trim(),
+        formData.username,
         formData.password
       );
 
@@ -146,19 +67,20 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
             "Has iniciado sesión con tus credenciales guardadas. Algunos datos pueden no estar actualizados.",
             [{ text: "Continuar", onPress: () => navigation.replace("Home") }]
           );
-        } else {
-          navigation.replace("Home");
+          return;
         }
-      } else {
-        Alert.alert(
-          result.isOffline
-            ? "Error de sesión offline"
-            : "Error de inicio de sesión",
-          result.error || "Error desconocido"
-        );
+
+        navigation.replace("Home");
+        return;
       }
-    } catch (e: any) {
-      console.log("Error en login:", e);
+
+      Alert.alert(
+        result.isOffline
+          ? "Error de sesión offline"
+          : "Error de inicio de sesión",
+        result.error || "Error desconocido"
+      );
+    } catch (e) {
       Alert.alert("Error", "Ocurrió un error inesperado. Intenta de nuevo.");
     } finally {
       setIsLoading(false);
@@ -176,25 +98,10 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
     navigation.navigate("ForgotPassword");
   };
 
-  const handleRegister = () => {
-    if (!isOnline) {
-      Alert.alert(
-        "Sin conexión",
-        "Necesitas conexión a internet para registrarte."
-      );
-      return;
-    }
+  const handleRegister = (): void => {
+    // ✅ Offline-first: NO bloquear por estar offline.
     navigation.navigate("Register");
   };
-
-  if (isCheckingSession) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Verificando sesión...</Text>
-      </View>
-    );
-  }
 
   return (
     <KeyboardAvoidingView
@@ -282,13 +189,8 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
             </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            onPress={handleRegister}
-            style={!isOnline && styles.disabledLink}
-          >
-            <Text style={[styles.link, !isOnline && styles.disabledLinkText]}>
-              Regístrate
-            </Text>
+          <TouchableOpacity onPress={handleRegister}>
+            <Text style={styles.link}>Regístrate</Text>
           </TouchableOpacity>
         </View>
 
@@ -300,10 +202,7 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
               color={COLORS.textSecondary}
             />
             <Text style={styles.offlineNoteText}>
-              Sin conexión.{" "}
-              {cachedEmail
-                ? "Puedes iniciar sesión con tu cuenta guardada."
-                : "Conéctate a internet para iniciar sesión por primera vez."}
+              Estás sin conexión. Puedes seguir usando la app en modo offline.
             </Text>
           </View>
         )}
@@ -319,17 +218,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     paddingHorizontal: 20,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: COLORS.background,
-  },
-  loadingText: {
-    marginTop: 12,
-    color: COLORS.textSecondary,
-    fontSize: FONT_SIZES.medium,
   },
   connectionBadge: {
     position: "absolute",

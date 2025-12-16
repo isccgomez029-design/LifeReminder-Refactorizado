@@ -140,6 +140,85 @@ export interface CareContact {
 }
 
 /* =========================
+   🆕 CUIDADORES / NOTIFICACIONES
+   ========================= */
+
+/**
+ * Severidad de notificaciones para cuidadores
+ */
+export type NotificationSeverity = "low" | "medium" | "high";
+
+/**
+ * Tipos de notificaciones
+ */
+export type NotificationType =
+  | "noncompliance" // Incumplimiento (múltiples posposiciones)
+  | "dismissal" // Descarte de alarma
+  | "missed" // Dosis perdida
+  | "completed" // Completado exitosamente
+  | "appointment"; // Recordatorio de cita
+
+/**
+ * Notificación del cuidador
+ */
+export interface CareNotification {
+  id: string;
+  type: NotificationType;
+  title: string;
+  message: string;
+  patientUid: string;
+  patientName: string;
+  itemType: "med" | "habit";
+  itemName: string;
+  snoozeCount: number;
+  severity: NotificationSeverity;
+  read: boolean;
+  createdAt: any; // Firebase Timestamp
+}
+
+/**
+ * Modos de acceso del cuidador
+ */
+export type CareAccessMode =
+  | "full" // Acceso completo (ver y editar)
+  | "read-only" // Solo lectura
+  | "alerts-only" // Solo recibir alertas
+  | "disabled"; // Desactivado
+
+/**
+ * Estado de invitación
+ */
+export type CareInviteStatus = "pending" | "accepted" | "rejected";
+
+/**
+ * Invitación de cuidado
+ */
+export interface CareInvite {
+  id: string;
+  caregiverUid: string;
+  name?: string;
+  phone?: string;
+  email?: string;
+  relationship?: string;
+  status: CareInviteStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Enlace de paciente (para vista del cuidador)
+ */
+export interface PatientLink {
+  id: string;
+  path: string;
+  ownerUid: string;
+  ownerName: string;
+  relationship?: string;
+  accessMode?: CareAccessMode;
+  photoUri?: string;
+}
+
+/* =========================
    HISTORIAL / REPORTES
    ========================= */
 export type HistoryEventType =

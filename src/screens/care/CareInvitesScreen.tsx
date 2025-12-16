@@ -1,5 +1,7 @@
 // src/screens/care/CareInvitesScreen.tsx
-import React, { useEffect, useState } from "react";
+// ✅ REFACTORIZADA: Solo UI, lógica en hooks y servicios
+
+import React from "react";
 import {
   View,
   Text,
@@ -10,154 +12,188 @@ import {
   TouchableOpacity,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-
-import { auth, db } from "../../config/firebaseConfig";
-import {
-  collection,
-  query,
-  where,
-  onSnapshot,
-  updateDoc,
-  doc,
-} from "firebase/firestore";
-
-import { offlineAuthService } from "../../services/offline/OfflineAuthService";
 import { COLORS } from "../../../types";
 
+// 🎯 Hook personalizado con toda la lógica
+import { useCareInvites } from "../../hooks/useCaregiverHooks";
+import type { CareInvite } from "../../services/careNetworkService";
+
 export default function CareInvitesScreen() {
-  const [invites, setInvites] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  // 🎯 Toda la lógica viene del hook
+  const { invites, loading, acceptInvite, rejectInvite } = useCareInvites();
 
-  // 🔥 Obtener UID real (online u offline)
-  const firebaseUser = auth.currentUser;
-  const offlineUser = offlineAuthService.getCurrentUser();
-  const userId = firebaseUser?.uid || offlineUser?.uid;
+  /* =========================================
+   *           📝 HANDLERS
+   * ========================================= */
 
-  useEffect(() => {
-    if (!userId) {
-      console.log("⚠️ No hay usuario autenticado (CareInvites)");
-      setLoading(false);
-      return;
-    }
-
-    const ref = collection(db, "careNetwork");
-    const q = query(
-      ref,
-      where("caregiverUid", "==", userId),
-      where("status", "==", "pending")
-    );
-
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-        setInvites(list);
-        setLoading(false);
-      },
-      (error) => {
-        console.log("❌ Error snapshot invitaciones:", error);
-        setLoading(false);
-      }
-    );
-
-    return () => unsub();
-  }, [userId]);
-
-  const acceptInvite = async (invite: any) => {
+  const handleAccept = async (invite: CareInvite) => {
     try {
-      const ref = doc(db, "careNetwork", invite.id);
-      await updateDoc(ref, {
-        status: "accepted",
-        updatedAt: new Date().toISOString(),
-      });
-      Alert.alert("✔️ Invitación aceptada");
-    } catch (e) {
+      await acceptInvite(invite.id);
+      Alert.alert("✅ Invitación aceptada");
+    } catch (error) {
       Alert.alert("Error", "No se pudo aceptar la invitación.");
     }
   };
 
-  const declineInvite = async (invite: any) => {
+  const handleReject = async (invite: CareInvite) => {
     try {
-      const ref = doc(db, "careNetwork", invite.id);
-      await updateDoc(ref, {
-        status: "rejected",
-        updatedAt: new Date().toISOString(),
-      });
-      Alert.alert("✔️ Invitación rechazada");
-    } catch (e) {
-      Alert.alert("Error", "No se pudo rechazar.");
+      await rejectInvite(invite.id);
+      Alert.alert("✅ Invitación rechazada");
+    } catch (error) {
+      Alert.alert("Error", "No se pudo rechazar la invitación.");
     }
   };
 
+  /* =========================================
+   *           🎨 RENDER HELPERS
+   * ========================================= */
+
+  const renderInviteCard = ({ item }: { item: CareInvite }) => (
+    <View style={styles.card}>
+      <Text style={styles.name}>{item.name || "Paciente desconocido"}</Text>
+      <Text style={styles.phone}>{item.phone || "Sin teléfono"}</Text>
+      {item.relationship && (
+        <Text style={styles.relationship}>Relación: {item.relationship}</Text>
+      )}
+
+      <View style={styles.buttons}>
+        <TouchableOpacity
+          style={[styles.btn, styles.acceptBtn]}
+          onPress={() => handleAccept(item)}
+        >
+          <Text style={styles.btnText}>Aceptar</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.btn, styles.rejectBtn]}
+          onPress={() => handleReject(item)}
+        >
+          <Text style={styles.btnText}>Rechazar</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+
+  const renderEmpty = () => (
+    <View style={styles.center}>
+      <Text style={styles.empty}>No tienes invitaciones pendientes</Text>
+    </View>
+  );
+
+  const renderLoading = () => (
+    <View style={styles.center}>
+      <ActivityIndicator size="large" color={COLORS.primary} />
+      <Text style={styles.loadingText}>Cargando invitaciones...</Text>
+    </View>
+  );
+
+  /* =========================================
+   *              🎨 RENDER MAIN
+   * ========================================= */
+
   if (loading) {
     return (
-      <SafeAreaView style={styles.center}>
-        <ActivityIndicator size="large" />
-        <Text>Cargando invitaciones...</Text>
-      </SafeAreaView>
+      <SafeAreaView style={styles.container}>{renderLoading()}</SafeAreaView>
     );
   }
 
   return (
     <SafeAreaView style={styles.container}>
       {invites.length === 0 ? (
-        <View style={styles.center}>
-          <Text style={styles.empty}>No tienes invitaciones pendientes</Text>
-        </View>
+        renderEmpty()
       ) : (
         <FlatList
           data={invites}
           keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <View style={styles.card}>
-              <Text style={styles.name}>
-                {item.name || "Paciente desconocido"}
-              </Text>
-              <Text style={styles.phone}>{item.phone || "Sin teléfono"}</Text>
-
-              <View style={styles.buttons}>
-                <TouchableOpacity
-                  style={[styles.btn, { backgroundColor: "#10b981" }]}
-                  onPress={() => acceptInvite(item)}
-                >
-                  <Text style={styles.btnText}>Aceptar</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.btn, { backgroundColor: "#ef4444" }]}
-                  onPress={() => declineInvite(item)}
-                >
-                  <Text style={styles.btnText}>Rechazar</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
+          renderItem={renderInviteCard}
+          contentContainerStyle={styles.listContent}
         />
       )}
     </SafeAreaView>
   );
 }
 
+/* =========================================
+ *              🎨 STYLES
+ * ========================================= */
+
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
-  center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  empty: { fontSize: 16, color: COLORS.textSecondary },
+  container: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
+  listContent: {
+    padding: 16,
+  },
+  center: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 16,
+    color: COLORS.textSecondary,
+  },
+  empty: {
+    fontSize: 16,
+    color: COLORS.textSecondary,
+    textAlign: "center",
+  },
 
   card: {
-    backgroundColor: "#fff",
-    padding: 12,
-    borderRadius: 10,
-    marginBottom: 10,
+    backgroundColor: COLORS.surface,
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
     elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
   },
-  name: { fontSize: 18, fontWeight: "bold" },
-  phone: { fontSize: 14, color: "#555" },
-  buttons: { flexDirection: "row", marginTop: 10, gap: 8 },
+  name: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: COLORS.text,
+    marginBottom: 4,
+  },
+  phone: {
+    fontSize: 14,
+    color: COLORS.textSecondary,
+    marginBottom: 4,
+  },
+  relationship: {
+    fontSize: 14,
+    color: COLORS.textSecondary,
+    marginBottom: 12,
+    fontStyle: "italic",
+  },
+
+  buttons: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 8,
+  },
   btn: {
     flex: 1,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 8,
     alignItems: "center",
+    justifyContent: "center",
   },
-  btnText: { color: "#fff", fontWeight: "700" },
+  acceptBtn: {
+    backgroundColor: "#10b981",
+  },
+  rejectBtn: {
+    backgroundColor: "#ef4444",
+  },
+  btnText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 15,
+  },
 });

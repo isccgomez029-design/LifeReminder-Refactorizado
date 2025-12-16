@@ -1,5 +1,5 @@
 // src/services/offline/OfflineAuthService.ts
-// ✅ MEJORADO: Restaura automáticamente la sesión de Firebase
+// ✅ Login offline siempre + Register offline-first (pantallas limpias) + Finalización automática online
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
@@ -9,8 +9,11 @@ import {
   signInWithEmailAndPassword,
   onAuthStateChanged,
   User,
+  createUserWithEmailAndPassword,
+  updateProfile,
 } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import { syncQueueService } from "./SyncQueueService";
 
 // ============================================================
 //                         TIPOS
@@ -26,6 +29,9 @@ export interface CachedUser {
   telefono?: string;
   fechaNacimiento?: string;
   rol?: string;
+  username?: string;
+  isPendingRegistration?: boolean;
+  pendingCreatedAt?: number;
   _cachedAt: number;
   _lastOnlineLogin: number;
 }
@@ -46,6 +52,31 @@ export interface OfflineAuthResult {
   errorCode?: string;
 }
 
+export interface RegisterParams {
+  fullName: string;
+  email: string;
+  username: string;
+  password: string;
+  confirmPassword: string;
+}
+
+export interface RegisterResult {
+  success: boolean;
+  isOffline: boolean; // true si se creó como pending local
+  user?: CachedUser;
+  error?: string;
+  errorCode?: string;
+}
+
+interface PendingRegistration {
+  tempUid: string;
+  email: string;
+  password: string;
+  fullName: string;
+  username: string;
+  createdAt: number;
+}
+
 // ============================================================
 //                      CONSTANTES
 // ============================================================
@@ -54,18 +85,15 @@ const STORAGE_KEYS = {
   CACHED_USER: "@lifereminder/auth/cached_user",
   CACHED_CREDENTIALS: "@lifereminder/auth/cached_credentials",
   CACHED_UID: "@lifereminder/auth/cached_uid",
-  // 🆕 Guardar email/password en texto plano (solo para restaurar Firebase)
-  // NOTA: En producción, considera usar react-native-keychain para mayor seguridad
   CACHED_PLAINTEXT_CREDS: "@lifereminder/auth/plaintext_creds",
+  PENDING_REGISTRATION: "@lifereminder/auth/pending_registration",
 };
 
-// ✅ CAMBIO: Para LifeReminder offline-first, NO forzamos expiración de sesión offline.
-// El usuario solo debe requerir internet para registrarse o para sincronizar/respaldar,
-// no para poder entrar a la app.
-//
-// Si en el futuro quieres volver a limitar, cambia este valor a, por ejemplo,
-// 30 * 24 * 60 * 60 * 1000.
+// ✅ Offline-first real: no expira
 const OFFLINE_SESSION_VALIDITY_MS: number | null = null;
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
+const USERNAME_RE = /^[a-zA-Z0-9._-]{3,20}$/;
 
 // ============================================================
 //                    UTILIDADES
@@ -114,14 +142,12 @@ export class OfflineAuthService {
   private firebaseAuthUnsubscribe: (() => void) | null = null;
   private isInitialized: boolean = false;
   private initializationPromise: Promise<CachedUser | null> | null = null;
+  private isFinalizingPending: boolean = false;
 
   // ==================== INICIALIZACIÓN ====================
 
   async initialize(): Promise<CachedUser | null> {
-    if (this.initializationPromise) {
-      return this.initializationPromise;
-    }
-
+    if (this.initializationPromise) return this.initializationPromise;
     this.initializationPromise = this._doInitialize();
     return this.initializationPromise;
   }
@@ -145,7 +171,12 @@ export class OfflineAuthService {
       }
     });
 
-    // ✅ Intentar restaurar sesión de Firebase si hay credenciales
+    // ✅ Si hay registro pendiente y estamos online, finalizarlo primero
+    if (this.isOnline) {
+      await this.finalizePendingRegistrationIfAny();
+    }
+
+    // ✅ Restaurar Firebase si aplica
     await this.attemptFirebaseRestore();
 
     const cachedUser = await this.restoreSession();
@@ -159,40 +190,6 @@ export class OfflineAuthService {
     this.isInitialized = true;
     log("✅ OfflineAuthService inicializado");
     return cachedUser;
-  }
-
-  /**
-   * ✅ Intenta restaurar sesión de Firebase con credenciales guardadas
-   */
-  private async attemptFirebaseRestore(): Promise<void> {
-    try {
-      if (auth.currentUser) {
-        log("✅ Firebase ya tiene sesión activa");
-        return;
-      }
-
-      if (!this.isOnline) {
-        log("📴 Offline - no se puede restaurar Firebase");
-        return;
-      }
-
-      const credsJson = await AsyncStorage.getItem(
-        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS
-      );
-      if (!credsJson) {
-        log("ℹ️ No hay credenciales guardadas");
-        return;
-      }
-
-      const { email, password } = JSON.parse(credsJson);
-
-      log("🔐 Intentando restaurar sesión de Firebase...");
-      await signInWithEmailAndPassword(auth, email, password);
-      log("✅ Sesión de Firebase restaurada exitosamente");
-    } catch (error: any) {
-      log("⚠️ No se pudo restaurar Firebase:", error.code);
-      // No lanzar error - el usuario puede seguir usando offline
-    }
   }
 
   private async loadCachedUid(): Promise<void> {
@@ -227,13 +224,345 @@ export class OfflineAuthService {
     log("🛑 OfflineAuthService destruido");
   }
 
-  // ==================== AUTENTICACIÓN ====================
+  // ============================================================
+  //                    REGISTER (PANTALLAS LIMPIAS)
+  // ============================================================
 
   /**
-   * ✅ Útil para RegisterScreen:
-   * Después de crear la cuenta (online), guarda credenciales locales para que el
-   * próximo inicio de sesión pueda ser 100% offline, incluso si el usuario cierra sesión.
+   * ✅ Register único (pantalla limpia):
+   * - Valida inputs
+   * - Detecta internet
+   * - Online: crea Firebase Auth + doc usuarios + siembra offline login
+   * - Offline: crea pending local + login inmediato offline
    */
+  async register(params: RegisterParams): Promise<RegisterResult> {
+    const validation = this.validateRegisterParams(params);
+    if (!validation.ok) {
+      return {
+        success: false,
+        isOffline: false,
+        error: validation.error,
+        errorCode: validation.code,
+      };
+    }
+
+    const email = params.email.trim().toLowerCase();
+    const password = params.password;
+    const fullName = params.fullName.trim();
+    const username = params.username.trim();
+
+    const netState = await NetInfo.fetch();
+    this.isOnline = isNetOnline(netState);
+
+    // OFFLINE => pending local
+    if (!this.isOnline) {
+      const res = await this.registerOfflinePending({
+        email,
+        password,
+        fullName,
+        username,
+      });
+
+      if (!res.success) {
+        return {
+          success: false,
+          isOffline: true,
+          error: res.error || "No se pudo crear el registro offline.",
+          errorCode: "register/offline-failed",
+        };
+      }
+
+      const u = await this.getCachedUser();
+      return {
+        success: true,
+        isOffline: true,
+        user: u || this.currentUser || undefined,
+      };
+    }
+
+    // ONLINE => Firebase real
+    try {
+      log("🧾 Intentando registro online (Firebase)...");
+
+      const cred = await createUserWithEmailAndPassword(auth, email, password);
+
+      if (cred.user) {
+        await updateProfile(cred.user, { displayName: fullName });
+
+        await setDoc(doc(db, "usuarios", cred.user.uid), {
+          uid: cred.user.uid,
+          email,
+          fullName,
+          username,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        // ✅ siembra offline login (hash + plaintext + cached user/profile)
+        await this.persistOfflineLoginAfterRegister(email, password);
+      }
+
+      const u = await this.getCachedUser();
+      return {
+        success: true,
+        isOffline: false,
+        user: u || this.currentUser || undefined,
+      };
+    } catch (e: any) {
+      const code = e?.code ?? "";
+      log("❌ Error registro online:", code);
+
+      let msg = "Ocurrió un error al crear tu cuenta. Intenta de nuevo.";
+      if (code === "auth/email-already-in-use")
+        msg = "Este correo ya está registrado.";
+      else if (code === "auth/invalid-email") msg = "El correo no es válido.";
+      else if (code === "auth/weak-password")
+        msg = "La contraseña es demasiado débil (mínimo 6 caracteres).";
+      else if (code === "auth/network-request-failed") {
+        // fallback: si se cayó en el registro, aún podemos hacer pending local
+        const fallback = await this.registerOfflinePending({
+          email,
+          password,
+          fullName,
+          username,
+        });
+
+        if (fallback.success) {
+          const u = await this.getCachedUser();
+          return {
+            success: true,
+            isOffline: true,
+            user: u || this.currentUser || undefined,
+          };
+        }
+        msg = "Sin conexión. No se pudo completar registro offline.";
+      }
+
+      return {
+        success: false,
+        isOffline: false,
+        error: msg,
+        errorCode: code || "register/unknown",
+      };
+    }
+  }
+
+  private validateRegisterParams(params: RegisterParams): {
+    ok: boolean;
+    error?: string;
+    code?: string;
+  } {
+    const fullName = (params.fullName || "").trim();
+    const email = (params.email || "").trim();
+    const username = (params.username || "").trim();
+    const password = params.password || "";
+    const confirm = params.confirmPassword || "";
+
+    if (!fullName)
+      return {
+        ok: false,
+        error: "Falta tu nombre",
+        code: "register/missing-name",
+      };
+    if (!email)
+      return {
+        ok: false,
+        error: "Ingresa tu correo",
+        code: "register/missing-email",
+      };
+    if (!EMAIL_RE.test(email)) {
+      return {
+        ok: false,
+        error: "Correo no válido. Ejemplo: usuario@dominio.com",
+        code: "register/invalid-email",
+      };
+    }
+    if (!username)
+      return {
+        ok: false,
+        error: "Ingresa tu nombre de usuario",
+        code: "register/missing-username",
+      };
+    if (!USERNAME_RE.test(username)) {
+      return {
+        ok: false,
+        error:
+          "Usuario no válido. Usa 3–20 caracteres: letras, números, punto, guion y guion_bajo.",
+        code: "register/invalid-username",
+      };
+    }
+    if (password.length < 6) {
+      return {
+        ok: false,
+        error: "La contraseña debe tener al menos 6 caracteres.",
+        code: "register/weak-password",
+      };
+    }
+    if (password !== confirm) {
+      return {
+        ok: false,
+        error: "Las contraseñas no coinciden",
+        code: "register/password-mismatch",
+      };
+    }
+    return { ok: true };
+  }
+
+  // ============================================================
+  //                     REGISTER OFFLINE PENDING
+  // ============================================================
+
+  async registerOfflinePending(params: {
+    email: string;
+    password: string;
+    fullName: string;
+    username: string;
+  }): Promise<{ success: boolean; tempUid?: string; error?: string }> {
+    const email = params.email.trim().toLowerCase();
+    const password = params.password;
+    const fullName = params.fullName.trim();
+    const username = params.username.trim();
+
+    if (!email || !password || !fullName || !username) {
+      return { success: false, error: "Datos incompletos." };
+    }
+
+    try {
+      const now = Date.now();
+      const tempUid = `temp_${now}_${Math.random().toString(36).slice(2, 9)}`;
+
+      const pending: PendingRegistration = {
+        tempUid,
+        email,
+        password,
+        fullName,
+        username,
+        createdAt: now,
+      };
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.PENDING_REGISTRATION,
+        JSON.stringify(pending)
+      );
+
+      const localUser: CachedUser = {
+        uid: tempUid,
+        email,
+        displayName: fullName,
+        photoURL: null,
+        emailVerified: false,
+        nombre: fullName,
+        username,
+        isPendingRegistration: true,
+        pendingCreatedAt: now,
+        _cachedAt: now,
+        _lastOnlineLogin: now,
+      };
+
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.CACHED_USER,
+        JSON.stringify(localUser)
+      );
+      await AsyncStorage.setItem(STORAGE_KEYS.CACHED_UID, tempUid);
+      cachedUidSync = tempUid;
+
+      await this.cacheCredentials(email, password);
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
+        JSON.stringify({ email, password })
+      );
+
+      this.currentUser = localUser;
+      this.notifyAuthStateListeners(localUser);
+
+      log("✅ Registro offline pendiente creado:", tempUid);
+      return { success: true, tempUid };
+    } catch (err: any) {
+      log("❌ registerOfflinePending() error:", err?.message);
+      return { success: false, error: "No se pudo crear el registro offline." };
+    }
+  }
+
+  private async getPendingRegistration(): Promise<PendingRegistration | null> {
+    try {
+      const raw = await AsyncStorage.getItem(STORAGE_KEYS.PENDING_REGISTRATION);
+      return raw ? (JSON.parse(raw) as PendingRegistration) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async clearPendingRegistration(): Promise<void> {
+    await AsyncStorage.removeItem(STORAGE_KEYS.PENDING_REGISTRATION);
+  }
+
+  async finalizePendingRegistrationIfAny(): Promise<void> {
+    if (this.isFinalizingPending) return;
+
+    try {
+      const netState = await NetInfo.fetch();
+      this.isOnline = isNetOnline(netState);
+      if (!this.isOnline) return;
+
+      const pending = await this.getPendingRegistration();
+      if (!pending) return;
+
+      this.isFinalizingPending = true;
+      log("🧩 Finalizando registro pendiente...");
+
+      if (auth.currentUser) {
+        if ((auth.currentUser.email || "").toLowerCase() === pending.email) {
+          await this.clearPendingRegistration();
+        }
+        this.isFinalizingPending = false;
+        return;
+      }
+
+      const cred = await createUserWithEmailAndPassword(
+        auth,
+        pending.email,
+        pending.password
+      );
+
+      await updateProfile(cred.user, { displayName: pending.fullName });
+
+      await setDoc(doc(db, "usuarios", cred.user.uid), {
+        uid: cred.user.uid,
+        email: pending.email,
+        fullName: pending.fullName,
+        username: pending.username,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      const realUid = cred.user.uid;
+      const oldUid = pending.tempUid;
+
+      await syncQueueService.migrateUserNamespace(oldUid, realUid);
+
+      await this.cacheUserFromFirebase(cred.user);
+      await this.cacheUserProfile(realUid);
+
+      await this.cacheCredentials(pending.email, pending.password);
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
+        JSON.stringify({ email: pending.email, password: pending.password })
+      );
+
+      await this.clearPendingRegistration();
+
+      log(`✅ Registro pendiente finalizado. ${oldUid} -> ${realUid}`);
+    } catch (err: any) {
+      log(
+        "⚠️ finalizePendingRegistrationIfAny() falló:",
+        err?.code || err?.message
+      );
+    } finally {
+      this.isFinalizingPending = false;
+    }
+  }
+
+  // ==================== AUTENTICACIÓN ====================
+
   async persistOfflineLoginAfterRegister(email: string, password: string) {
     const e = email.trim().toLowerCase();
     if (!e || !password) return;
@@ -257,15 +586,53 @@ export class OfflineAuthService {
   }
 
   async signIn(email: string, password: string): Promise<OfflineAuthResult> {
-    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedEmail = (email || "").trim().toLowerCase();
+    const pass = password || "";
+
+    // ✅ Validación aquí (para mantener pantallas limpias)
+    if (!trimmedEmail) {
+      return {
+        success: false,
+        isOffline: false,
+        error: "Por favor, ingresa tu correo.",
+        errorCode: "login/missing-email",
+      };
+    }
+
+    if (!EMAIL_RE.test(trimmedEmail)) {
+      return {
+        success: false,
+        isOffline: false,
+        error: "El formato del correo no es válido.",
+        errorCode: "login/invalid-email",
+      };
+    }
+
+    if (!pass.trim()) {
+      return {
+        success: false,
+        isOffline: false,
+        error: "Por favor, ingresa tu contraseña.",
+        errorCode: "login/missing-password",
+      };
+    }
+
+    if (pass.length < 6) {
+      return {
+        success: false,
+        isOffline: false,
+        error: "La contraseña debe tener al menos 6 caracteres.",
+        errorCode: "login/weak-password",
+      };
+    }
 
     const netState = await NetInfo.fetch();
     this.isOnline = isNetOnline(netState);
 
     if (this.isOnline) {
-      return this.signInOnline(trimmedEmail, password);
+      return this.signInOnline(trimmedEmail, pass);
     } else {
-      return this.signInOffline(trimmedEmail, password);
+      return this.signInOffline(trimmedEmail, pass);
     }
   }
 
@@ -282,7 +649,6 @@ export class OfflineAuthService {
       await this.cacheUserFromFirebase(user);
       await this.cacheCredentials(email, password);
 
-      // ✅ Guardar credenciales en texto plano para restaurar Firebase
       await AsyncStorage.setItem(
         STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
         JSON.stringify({ email, password })
@@ -368,9 +734,8 @@ export class OfflineAuthService {
         };
       }
 
-      // ✅ CAMBIO: No expirar sesión offline.
-      // Con que el password coincida con el hash cacheado y exista un usuario cacheado,
-      // permitimos entrar siempre.
+      // ✅ Sin expiración offline (OFFLINE_SESSION_VALIDITY_MS queda reservado)
+      void OFFLINE_SESSION_VALIDITY_MS;
 
       await this.updateCredentialsLastUsed();
 
@@ -416,6 +781,44 @@ export class OfflineAuthService {
     }
   }
 
+  // ==================== RESTORE FIREBASE SESSION ====================
+
+  private async attemptFirebaseRestore(): Promise<void> {
+    try {
+      if (auth.currentUser) {
+        log("✅ Firebase ya tiene sesión activa");
+        return;
+      }
+
+      if (!this.isOnline) {
+        log("📴 Offline - no se puede restaurar Firebase");
+        return;
+      }
+
+      const pending = await this.getPendingRegistration();
+      if (pending) {
+        log("ℹ️ Hay registro pendiente, se omite Firebase restore");
+        return;
+      }
+
+      const credsJson = await AsyncStorage.getItem(
+        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS
+      );
+      if (!credsJson) {
+        log("ℹ️ No hay credenciales guardadas");
+        return;
+      }
+
+      const { email, password } = JSON.parse(credsJson);
+
+      log("🔐 Intentando restaurar sesión de Firebase...");
+      await signInWithEmailAndPassword(auth, email, password);
+      log("✅ Sesión de Firebase restaurada exitosamente");
+    } catch (error: any) {
+      log("⚠️ No se pudo restaurar Firebase:", error.code);
+    }
+  }
+
   // ==================== CACHÉ DE USUARIO ====================
 
   private async cacheUserFromFirebase(user: User): Promise<void> {
@@ -426,6 +829,7 @@ export class OfflineAuthService {
         displayName: user.displayName,
         photoURL: user.photoURL,
         emailVerified: user.emailVerified,
+        isPendingRegistration: false,
         _cachedAt: Date.now(),
         _lastOnlineLogin: Date.now(),
       };
@@ -449,32 +853,47 @@ export class OfflineAuthService {
 
   private async cacheUserProfile(uid: string): Promise<void> {
     try {
-      const userDocRef = doc(db, "users", uid);
-      const userDoc = await getDoc(userDocRef);
+      const collectionsToTry = ["usuarios", "users"];
+      let profileData: Record<string, any> | null = null;
 
-      if (userDoc.exists()) {
-        const profileData = userDoc.data();
-        const cachedUser = await this.getCachedUser();
-
-        if (cachedUser) {
-          const updatedUser: CachedUser = {
-            ...cachedUser,
-            nombre: profileData.nombre || profileData.displayName,
-            telefono: profileData.telefono || profileData.phone,
-            fechaNacimiento: profileData.fechaNacimiento,
-            rol: profileData.rol,
-          };
-
-          await AsyncStorage.setItem(
-            STORAGE_KEYS.CACHED_USER,
-            JSON.stringify(updatedUser)
-          );
-
-          this.currentUser = updatedUser;
+      for (const col of collectionsToTry) {
+        const ref = doc(db, col, uid);
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          profileData = snap.data();
+          log(`💾 Perfil encontrado en colección: ${col}`);
+          break;
         }
-
-        log("💾 Perfil cacheado");
       }
+
+      if (!profileData) return;
+
+      const cachedUser = await this.getCachedUser();
+      if (!cachedUser) return;
+
+      const updatedUser: CachedUser = {
+        ...cachedUser,
+        nombre:
+          profileData.nombre ??
+          profileData.fullName ??
+          profileData.displayName ??
+          cachedUser.displayName ??
+          undefined,
+        username: profileData.username ?? cachedUser.username ?? undefined,
+        telefono: profileData.telefono ?? profileData.phone ?? undefined,
+        fechaNacimiento: profileData.fechaNacimiento ?? undefined,
+        rol: profileData.rol ?? undefined,
+      };
+
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.CACHED_USER,
+        JSON.stringify(updatedUser)
+      );
+
+      this.currentUser = updatedUser;
+      this.notifyAuthStateListeners(updatedUser);
+
+      log("✅ Perfil cacheado/actualizado");
     } catch (error) {
       log("❌ Error cacheando perfil:", error);
     }
@@ -555,8 +974,6 @@ export class OfflineAuthService {
       const cachedUser = await this.getCachedUser();
 
       if (cachedUser) {
-        // ✅ CAMBIO: restaurar siempre desde caché.
-        // La sincronización con Firebase se intentará cuando haya conexión.
         log("✅ Sesión restaurada desde caché");
         this.currentUser = cachedUser;
         cachedUidSync = cachedUser.uid;
@@ -573,6 +990,8 @@ export class OfflineAuthService {
 
   private async syncSessionOnReconnect(): Promise<void> {
     try {
+      await this.finalizePendingRegistrationIfAny();
+
       if (!auth.currentUser) {
         await this.attemptFirebaseRestore();
       }
@@ -597,6 +1016,7 @@ export class OfflineAuthService {
         STORAGE_KEYS.CACHED_CREDENTIALS,
         STORAGE_KEYS.CACHED_UID,
         STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
+        STORAGE_KEYS.PENDING_REGISTRATION,
       ]);
       this.currentUser = null;
       cachedUidSync = null;
@@ -683,7 +1103,7 @@ export class OfflineAuthService {
     callback: (user: CachedUser | null) => void
   ): () => void {
     this.authStateListeners.add(callback);
-    callback(this.currentUser);
+    callback(this.currentUser);3
     return () => this.authStateListeners.delete(callback);
   }
 

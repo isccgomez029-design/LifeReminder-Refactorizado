@@ -164,7 +164,6 @@ export default function App() {
     <OfflineProvider>
       <SafeAreaProvider>
         <NavigationContainer ref={navigationRef}>
-          {/* ✅ DEBE estar DENTRO del NavigationContainer */}
           <AlarmInitializer />
           <StackNavigator />
         </NavigationContainer>

@@ -1,5 +1,7 @@
 // src/screens/alarm/AlarmScreen.tsx
-// ✅ CORREGIDO: Espera a que AsyncStorage persista antes de cerrar
+// ✅ CORREGIDO: Espera persistencia antes de cerrar
+// ✅ NUEVO: Al posponer MEDS, actualiza nextDueAt/proximaToma sumando minutos pospuestos
+// ✅ EXTRA: Evita que se “cuelgue” offline (logs a cuidadores NO bloquean)
 
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -18,7 +20,6 @@ import { Audio } from "expo-av";
 import { useRoute, useNavigation, RouteProp } from "@react-navigation/native";
 import { StackNavigationProp } from "@react-navigation/stack";
 import { RootStackParamList } from "../../navigation/StackNavigator";
-import { COLORS, FONT_SIZES } from "../../../types";
 
 import { auth } from "../../config/firebaseConfig";
 import { offlineAuthService } from "../../services/offline/OfflineAuthService";
@@ -36,7 +37,7 @@ const freqToMs = (freq?: string): number => {
   if (!freq) return 0;
   const m = freq.match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return 0;
-  return (parseInt(m[1]) * 60 + parseInt(m[2])) * 60000;
+  return (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) * 60000;
 };
 
 type AlarmRoute = RouteProp<RootStackParamList, "Alarm">;
@@ -45,12 +46,39 @@ type Nav = StackNavigationProp<RootStackParamList, "Alarm">;
 const VIBRATION_PATTERN = [0, 400, 200, 400, 200, 400];
 const SNOOZE_LIMIT = 3;
 
-// ✅ NUEVO: Helper para esperar persistencia
+// ✅ Helper para esperar persistencia (AsyncStorage)
 async function waitForPersistence(retries = 5, delayMs = 200): Promise<void> {
   for (let i = 0; i < retries; i++) {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 }
+
+// ✅ Date safe
+const toDateSafe = (v: any): Date | null => {
+  if (!v) return null;
+
+  if (typeof v === "string" || typeof v === "number") {
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  if (typeof v?.toDate === "function") {
+    const d = v.toDate();
+    return d instanceof Date && !isNaN(d.getTime()) ? d : null;
+  }
+
+  if (typeof v?.seconds === "number") {
+    const d = new Date(v.seconds * 1000);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
+};
+
+// ✅ helper: log no bloqueante (evita cuelgues offline)
+const fireAndForget = (p: Promise<any>) => {
+  p.catch(() => {});
+};
 
 export default function AlarmScreen() {
   const route = useRoute<AlarmRoute>();
@@ -81,12 +109,14 @@ export default function AlarmScreen() {
 
   const [sound, setSound] = useState<Audio.Sound | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
   const [snoozeCount, setSnoozeCount] = useState<number>(
     initialSnoozeCount || 0
   );
+
   const isProcessingRef = useRef(false);
 
-  // Sonido
+  // ===================== Sound =====================
   useEffect(() => {
     let isMounted = true;
     let loadedSound: Audio.Sound | null = null;
@@ -97,6 +127,7 @@ export default function AlarmScreen() {
           require("../../../assets/alarm_sound.mp3"),
           { isLooping: true, volume: 1 }
         );
+
         if (isMounted) {
           loadedSound = s;
           setSound(s);
@@ -104,7 +135,9 @@ export default function AlarmScreen() {
         } else {
           await s.unloadAsync();
         }
-      } catch (err) {}
+      } catch {
+        // no-op
+      }
     }
 
     loadSound();
@@ -118,13 +151,13 @@ export default function AlarmScreen() {
     };
   }, []);
 
-  // Vibración
+  // ===================== Vibration =====================
   useEffect(() => {
     Vibration.vibrate(VIBRATION_PATTERN, true);
     return () => Vibration.cancel();
   }, []);
 
-  // Animación
+  // ===================== Pulse animation =====================
   useEffect(() => {
     const pulse = Animated.loop(
       Animated.sequence([
@@ -142,7 +175,7 @@ export default function AlarmScreen() {
     );
     pulse.start();
     return () => pulse.stop();
-  }, []);
+  }, [pulseAnim]);
 
   const stopAlarm = async () => {
     try {
@@ -151,13 +184,14 @@ export default function AlarmScreen() {
         await sound.stopAsync().catch(() => {});
         await sound.unloadAsync().catch(() => {});
       }
-    } catch (err) {}
+    } catch {
+      // no-op
+    }
   };
 
   const closeScreen = () => {
-    if (navigation.canGoBack()) {
-      navigation.goBack();
-    } else {
+    if (navigation.canGoBack()) navigation.goBack();
+    else {
       navigation.reset({
         index: 0,
         routes: [{ name: "MainTabs" as any }],
@@ -165,8 +199,33 @@ export default function AlarmScreen() {
     }
   };
 
+  // ✅ Obtener base nextDueAt desde cache (para sumar minutos encima)
+  const getBaseNextDueAtForMed = async (): Promise<Date> => {
+    const now = new Date();
+
+    try {
+      if (!ownerUid || !medId) return now;
+
+      const cached = await syncQueueService.getItemFromCache(
+        "medications",
+        ownerUid,
+        medId
+      );
+
+      const cachedNext = toDateSafe((cached as any)?.nextDueAt);
+
+      // Si ya hay una próxima toma futura, usamos esa como base
+      if (cachedNext && cachedNext.getTime() > now.getTime()) return cachedNext;
+
+      // Si no, base = ahora
+      return now;
+    } catch {
+      return now;
+    }
+  };
+
   // ================================================================
-  //   ✅ TOMAR MEDICAMENTO - CORREGIDO
+  //   ✅ TOMAR (MED / HABIT)
   // ================================================================
   const handleComplete = async () => {
     if (isProcessingRef.current) return;
@@ -188,6 +247,8 @@ export default function AlarmScreen() {
           cantidad: newQty,
           updatedAt: now.toISOString(),
           currentAlarmId: null,
+
+          // ✅ al completar, limpiamos snooze
           snoozeCount: 0,
           snoozedUntil: null,
           lastSnoozeAt: null,
@@ -222,10 +283,11 @@ export default function AlarmScreen() {
             if (result.success && result.notificationId) {
               updateData.currentAlarmId = result.notificationId;
             }
-          } catch (e) {}
+          } catch {
+            // no-op
+          }
         }
 
-        // ✅ CRÍTICO: Actualizar cache y esperar persistencia
         await syncQueueService.updateItemInCache(
           "medications",
           ownerUid,
@@ -241,23 +303,204 @@ export default function AlarmScreen() {
           updateData
         );
 
-        // ✅ ESPERAR que AsyncStorage termine de escribir
         await waitForPersistence();
 
-        await logComplianceSuccess({
-          patientUid: ownerUid,
-          itemId: medId,
-          itemName: title,
-          itemType: "med",
-          afterSnoozes: snoozeCount,
-        }).catch(() => {});
+        // ✅ no bloquea cierre si estás offline
+        fireAndForget(
+          logComplianceSuccess({
+            patientUid: ownerUid,
+            itemId: medId,
+            itemName: title,
+            itemType: "med",
+            afterSnoozes: snoozeCount,
+          })
+        );
       } else if (type === "habit" && habitId && ownerUid) {
+        const now = new Date();
+
         const updateData = {
           currentAlarmId: null,
           snoozeCount: 0,
           snoozedUntil: null,
           lastSnoozeAt: null,
-          lastCompletedAt: new Date().toISOString(),
+          lastCompletedAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+        };
+
+        await syncQueueService.updateItemInCache(
+          "habits",
+          ownerUid,
+          habitId,
+          updateData
+        );
+
+        await syncQueueService.enqueue(
+          "UPDATE",
+          "habits",
+          habitId,
+          ownerUid,
+          updateData
+        );
+
+        await waitForPersistence();
+
+        // ✅ no bloquea cierre si estás offline
+        fireAndForget(
+          logComplianceSuccess({
+            patientUid: ownerUid,
+            itemId: habitId,
+            itemName: title,
+            itemType: "habit",
+            afterSnoozes: snoozeCount,
+          })
+        );
+      }
+    } catch {
+      // no-op
+    } finally {
+      isProcessingRef.current = false;
+      closeScreen();
+    }
+  };
+
+  // ================================================================
+  //   ✅ POSPONER (MED / HABIT)
+  // ================================================================
+  const handleSnooze = async (minutes: number) => {
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+
+    const newSnoozeCount = snoozeCount + 1;
+    setSnoozeCount(newSnoozeCount);
+
+    await stopAlarm();
+
+    try {
+      const itemId = type === "med" ? medId : habitId;
+
+      // ✅ logs/notificaciones NO bloquean (para que offline no se cuelgue)
+      if (ownerUid && itemId) {
+        fireAndForget(
+          logSnoozeEvent({
+            patientUid: ownerUid,
+            itemId,
+            itemName: title,
+            itemType: type,
+            snoozeMinutes: minutes,
+            snoozeCount: newSnoozeCount,
+          })
+        );
+
+        if (newSnoozeCount >= SNOOZE_LIMIT) {
+          fireAndForget(
+            notifyCaregiversAboutNoncompliance({
+              patientUid: ownerUid,
+              patientName: patientName || "Paciente",
+              medicationName: title,
+              snoozeCount: newSnoozeCount,
+              type,
+            })
+          );
+        }
+      }
+
+      let newAlarmId: string | null = null;
+
+      // =================== MEDS: mover nextDueAt/proximaToma ===================
+      if (type === "med" && medId && ownerUid) {
+        // ✅ Base = nextDueAt existente (si futuro), si no: ahora
+        const base = await getBaseNextDueAtForMed();
+        const newDueAt = new Date(base.getTime() + minutes * 60 * 1000);
+
+        // ✅ programar alarma con nueva fecha
+        try {
+          const result = await offlineAlarmService.scheduleMedicationAlarm(
+            newDueAt,
+            {
+              nombre: title,
+              dosis: doseLabel,
+              imageUri,
+              medId,
+              ownerUid,
+              frecuencia,
+              cantidadActual,
+              cantidadPorToma,
+              patientName,
+              snoozeCount: newSnoozeCount,
+            }
+          );
+
+          if (result.success) {
+            newAlarmId = result.notificationId;
+          }
+        } catch {
+          // no-op
+        }
+
+        const updateData: Record<string, any> = {
+          currentAlarmId: newAlarmId,
+          snoozeCount: newSnoozeCount,
+          snoozedUntil: newDueAt.toISOString(),
+          lastSnoozeAt: new Date().toISOString(),
+
+          // ✅ CLAVE: mover próxima toma (esto actualiza MedsToday offline/online)
+          nextDueAt: newDueAt.toISOString(),
+          proximaToma: newDueAt.toLocaleTimeString("es-MX", {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+
+          updatedAt: new Date().toISOString(),
+        };
+
+        await syncQueueService.updateItemInCache(
+          "medications",
+          ownerUid,
+          medId,
+          updateData
+        );
+
+        await syncQueueService.enqueue(
+          "UPDATE",
+          "medications",
+          medId,
+          ownerUid,
+          updateData
+        );
+
+        await waitForPersistence();
+      }
+
+      // =================== HABITS: solo mover trigger (no nextDueAt) ===================
+      else if (type === "habit" && habitId && ownerUid) {
+        const newTriggerTime = new Date(Date.now() + minutes * 60 * 1000);
+
+        try {
+          const result = await offlineAlarmService.scheduleHabitAlarm(
+            newTriggerTime,
+            {
+              name: title,
+              icon: habitIcon,
+              lib: habitLib,
+              habitId,
+              ownerUid,
+              patientName,
+              snoozeCount: newSnoozeCount,
+            }
+          );
+
+          if (result.success) {
+            newAlarmId = result.notificationId;
+          }
+        } catch {
+          // no-op
+        }
+
+        const updateData = {
+          currentAlarmId: newAlarmId,
+          snoozeCount: newSnoozeCount,
+          snoozedUntil: newTriggerTime.toISOString(),
+          lastSnoozeAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
 
@@ -277,152 +520,9 @@ export default function AlarmScreen() {
         );
 
         await waitForPersistence();
-
-        await logComplianceSuccess({
-          patientUid: ownerUid,
-          itemId: habitId,
-          itemName: title,
-          itemType: "habit",
-          afterSnoozes: snoozeCount,
-        }).catch(() => {});
       }
-    } catch (err) {
-    } finally {
-      isProcessingRef.current = false;
-      // ✅ Cerrar DESPUÉS de persistir
-      closeScreen();
-    }
-  };
-
-  // ================================================================
-  //   ✅ POSPONER ALARMA - CORREGIDO
-  // ================================================================
-  const handleSnooze = async (minutes: number) => {
-    if (isProcessingRef.current) return;
-    isProcessingRef.current = true;
-
-    const newSnoozeCount = snoozeCount + 1;
-    await stopAlarm();
-
-    try {
-      const itemId = type === "med" ? medId : habitId;
-
-      if (ownerUid && itemId) {
-        await logSnoozeEvent({
-          patientUid: ownerUid,
-          itemId,
-          itemName: title,
-          itemType: type,
-          snoozeMinutes: minutes,
-          snoozeCount: newSnoozeCount,
-        }).catch(() => {});
-
-        if (newSnoozeCount >= SNOOZE_LIMIT) {
-          await notifyCaregiversAboutNoncompliance({
-            patientUid: ownerUid,
-            patientName: patientName || "Paciente",
-            medicationName: title,
-            snoozeCount: newSnoozeCount,
-            type,
-          }).catch(() => {});
-        }
-      }
-
-      const newTriggerTime = new Date(Date.now() + minutes * 60 * 1000);
-      let newAlarmId: string | null = null;
-
-      if (type === "med" && medId && ownerUid) {
-        try {
-          const result = await offlineAlarmService.scheduleMedicationAlarm(
-            newTriggerTime,
-            {
-              nombre: title,
-              dosis: doseLabel,
-              imageUri,
-              medId,
-              ownerUid,
-              frecuencia,
-              cantidadActual,
-              cantidadPorToma,
-              patientName,
-              snoozeCount: newSnoozeCount,
-            }
-          );
-
-          if (result.success) {
-            newAlarmId = result.notificationId;
-          }
-        } catch (e) {}
-
-        const updateData = {
-          currentAlarmId: newAlarmId,
-          snoozeCount: newSnoozeCount,
-          snoozedUntil: newTriggerTime.toISOString(),
-          lastSnoozeAt: new Date().toISOString(),
-        };
-
-        await syncQueueService.updateItemInCache(
-          "medications",
-          ownerUid,
-          medId,
-          updateData
-        );
-
-        await syncQueueService.enqueue(
-          "UPDATE",
-          "medications",
-          medId,
-          ownerUid,
-          updateData
-        );
-
-        // ✅ ESPERAR persistencia
-        await waitForPersistence();
-      } else if (type === "habit" && habitId && ownerUid) {
-        try {
-          const result = await offlineAlarmService.scheduleHabitAlarm(
-            newTriggerTime,
-            {
-              name: title,
-              icon: habitIcon,
-              lib: habitLib,
-              habitId,
-              ownerUid,
-              patientName,
-              snoozeCount: newSnoozeCount,
-            }
-          );
-
-          if (result.success) {
-            newAlarmId = result.notificationId;
-          }
-        } catch (e) {}
-
-        const updateData = {
-          currentAlarmId: newAlarmId,
-          snoozeCount: newSnoozeCount,
-          snoozedUntil: newTriggerTime.toISOString(),
-          lastSnoozeAt: new Date().toISOString(),
-        };
-
-        await syncQueueService.updateItemInCache(
-          "habits",
-          ownerUid,
-          habitId,
-          updateData
-        );
-
-        await syncQueueService.enqueue(
-          "UPDATE",
-          "habits",
-          habitId,
-          ownerUid,
-          updateData
-        );
-
-        await waitForPersistence();
-      }
-    } catch (err) {
+    } catch {
+      // no-op
     } finally {
       isProcessingRef.current = false;
       closeScreen();
@@ -430,7 +530,7 @@ export default function AlarmScreen() {
   };
 
   // ================================================================
-  //   ✅ DESCARTAR ALARMA - CORREGIDO
+  //   ✅ DESCARTAR
   // ================================================================
   const handleDismiss = async () => {
     if (isProcessingRef.current) return;
@@ -440,32 +540,35 @@ export default function AlarmScreen() {
 
     try {
       const itemId = type === "med" ? medId : habitId;
+
+      // ✅ no bloquear cierre
       if (ownerUid && itemId) {
-        try {
-          await logDismissalEvent({
+        fireAndForget(
+          logDismissalEvent({
             patientUid: ownerUid,
             itemId,
             itemName: title,
             itemType: type,
             snoozeCountBeforeDismiss: snoozeCount,
-          });
-        } catch (e) {}
+          })
+        );
 
-        try {
-          await notifyCaregiversAboutDismissal({
+        fireAndForget(
+          notifyCaregiversAboutDismissal({
             patientUid: ownerUid,
             patientName: patientName || "Paciente",
             itemName: title,
             itemType: type,
             snoozeCountBeforeDismiss: snoozeCount,
-          });
-        } catch (e) {}
+          })
+        );
       }
-    } catch (err) {}
+    } catch {
+      // no-op
+    }
 
-    // ✅ ESPERAR persistencia
     await waitForPersistence();
-
+    isProcessingRef.current = false;
     closeScreen();
   };
 
@@ -556,6 +659,7 @@ export default function AlarmScreen() {
               <MaterialIcons name="snooze" size={18} color="#fff" />
               <Text style={styles.snoozeText}>5 min</Text>
             </TouchableOpacity>
+
             <TouchableOpacity
               style={styles.snoozeButton}
               onPress={() => handleSnooze(10)}

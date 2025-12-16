@@ -1,12 +1,13 @@
 // src/screens/care/CaregiverNotificationsScreen.tsx
-import React, { useEffect, useState } from "react";
+// ✅ REFACTORIZADA: Solo UI, lógica en hooks y servicios
+
+import React from "react";
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Alert,
   RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -15,148 +16,34 @@ import { COLORS, FONT_SIZES } from "../../../types";
 import { StackNavigationProp } from "@react-navigation/stack";
 import { RootStackParamList } from "../../navigation/StackNavigator";
 
-// Firebase
+// 🎯 Hook personalizado con toda la lógica
+import { useCaregiverNotifications } from "../../hooks/useCaregiverHooks";
 import {
-  collection,
-  query,
-  orderBy,
-  onSnapshot,
-  updateDoc,
-  doc,
-  limit,
-} from "firebase/firestore";
-import { auth, db } from "../../config/firebaseConfig";
+  getSeverityColor,
+  formatNotificationDate,
+  type CareNotification,
+} from "../../services/Notifications";
 
 type Nav = StackNavigationProp<RootStackParamList, "CareInvites">;
 
-type CareNotification = {
-  id: string;
-  type: string;
-  title: string;
-  message: string;
-  patientUid: string;
-  patientName: string;
-  itemType: "med" | "habit";
-  itemName: string;
-  snoozeCount: number;
-  severity: "low" | "medium" | "high";
-  read: boolean;
-  createdAt: any;
-};
-
-export default function CaregiverNotificationsScreen({
-  navigation,
-}: {
+interface Props {
   navigation: Nav;
-}) {
-  const [notifications, setNotifications] = useState<CareNotification[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+}
 
-  const user = auth.currentUser;
+export default function CaregiverNotificationsScreen({ navigation }: Props) {
+  // 🎯 Toda la lógica viene del hook
+  const {
+    notifications,
+    loading,
+    refreshing,
+    unreadCount,
+    onRefresh,
+    markAsRead,
+  } = useCaregiverNotifications();
 
-  const loadNotifications = () => {
-    if (!user) {
-      setLoading(false);
-      return;
-    }
-
-    const notifRef = collection(db, "users", user.uid, "notifications");
-    const q = query(notifRef, orderBy("createdAt", "desc"), limit(50));
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const list: CareNotification[] = snapshot.docs.map((doc) => {
-          const data = doc.data() as any;
-          return {
-            id: doc.id,
-            type: data.type || "noncompliance",
-            title: data.title || "Notificación",
-            message: data.message || "",
-            patientUid: data.patientUid || "",
-            patientName: data.patientName || "Paciente",
-            itemType: data.itemType || "med",
-            itemName: data.itemName || "",
-            snoozeCount: data.snoozeCount || 0,
-            severity: data.severity || "medium",
-            read: !!data.read,
-            createdAt: data.createdAt,
-          };
-        });
-
-        setNotifications(list);
-        setLoading(false);
-        setRefreshing(false);
-      },
-      (error) => {
-        console.error("Error cargando notificaciones:", error);
-        setLoading(false);
-        setRefreshing(false);
-        Alert.alert("Error", "No se pudieron cargar las notificaciones");
-      }
-    );
-
-    return unsubscribe;
-  };
-
-  useEffect(() => {
-    const unsubscribe = loadNotifications();
-    return unsubscribe;
-  }, [user]);
-
-  const onRefresh = () => {
-    setRefreshing(true);
-    loadNotifications();
-  };
-
-  const markAsRead = async (notifId: string) => {
-    if (!user) return;
-
-    try {
-      const notifRef = doc(db, "users", user.uid, "notifications", notifId);
-      await updateDoc(notifRef, { read: true });
-    } catch (error) {
-      console.error("Error marcando como leída:", error);
-    }
-  };
-
-  const getSeverityColor = (severity: string) => {
-    switch (severity) {
-      case "high":
-        return "#D32F2F";
-      case "medium":
-        return "#FFA726";
-      case "low":
-        return "#66BB6A";
-      default:
-        return COLORS.textSecondary;
-    }
-  };
-
-  const formatDate = (timestamp: any) => {
-    if (!timestamp) return "";
-
-    try {
-      const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-      const now = new Date();
-      const diffMs = now.getTime() - date.getTime();
-      const diffMins = Math.floor(diffMs / 60000);
-
-      if (diffMins < 1) return "Ahora mismo";
-      if (diffMins < 60) return `Hace ${diffMins} min`;
-      if (diffMins < 1440) return `Hace ${Math.floor(diffMins / 60)} h`;
-
-      return date.toLocaleDateString("es-MX", {
-        day: "numeric",
-        month: "short",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-    } catch {
-      return "";
-    }
-  };
+  /* =========================================
+   *           🎨 RENDER HELPERS
+   * ========================================= */
 
   const renderNotification = (notif: CareNotification) => {
     const severityColor = getSeverityColor(notif.severity);
@@ -195,7 +82,7 @@ export default function CaregiverNotificationsScreen({
                 style={{ marginLeft: 12 }}
               />
               <Text style={styles.notifMetaText}>
-                {formatDate(notif.createdAt)}
+                {formatNotificationDate(notif.createdAt)}
               </Text>
             </View>
           </View>
@@ -206,7 +93,27 @@ export default function CaregiverNotificationsScreen({
     );
   };
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  const renderEmpty = () => (
+    <View style={styles.emptyCard}>
+      <MaterialIcons
+        name="notifications-none"
+        size={48}
+        color={COLORS.textSecondary}
+      />
+      <Text style={styles.emptyTitle}>Sin notificaciones</Text>
+      <Text style={styles.emptyText}>
+        Aquí aparecerán las alertas de tus pacientes
+      </Text>
+    </View>
+  );
+
+  const renderLoading = () => (
+    <Text style={styles.emptyText}>Cargando notificaciones...</Text>
+  );
+
+  /* =========================================
+   *              🎨 RENDER MAIN
+   * ========================================= */
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -218,6 +125,7 @@ export default function CaregiverNotificationsScreen({
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
       >
+        {/* Header */}
         <View style={styles.headerRow}>
           <View style={{ flex: 1 }}>
             <Text style={styles.title}>Notificaciones</Text>
@@ -227,6 +135,7 @@ export default function CaregiverNotificationsScreen({
               </Text>
             )}
           </View>
+
           <View style={styles.sectionIcon}>
             <MaterialIcons
               name="notifications"
@@ -243,27 +152,20 @@ export default function CaregiverNotificationsScreen({
           </View>
         </View>
 
-        {loading ? (
-          <Text style={styles.emptyText}>Cargando notificaciones...</Text>
-        ) : notifications.length === 0 ? (
-          <View style={styles.emptyCard}>
-            <MaterialIcons
-              name="notifications-none"
-              size={48}
-              color={COLORS.textSecondary}
-            />
-            <Text style={styles.emptyTitle}>Sin notificaciones</Text>
-            <Text style={styles.emptyText}>
-              Aquí aparecerán las alertas de tus pacientes
-            </Text>
-          </View>
-        ) : (
-          notifications.map(renderNotification)
-        )}
+        {/* Content */}
+        {loading
+          ? renderLoading()
+          : notifications.length === 0
+          ? renderEmpty()
+          : notifications.map(renderNotification)}
       </ScrollView>
     </SafeAreaView>
   );
 }
+
+/* =========================================
+ *              🎨 STYLES
+ * ========================================= */
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },

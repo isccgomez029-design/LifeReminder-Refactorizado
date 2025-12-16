@@ -1,5 +1,5 @@
 // src/screens/meds/AddMedicationScreen.tsx
-// ✅ ACTUALIZADO: Alarmas delegadas a medsAlarmsService (offline-first)
+// ✅ ACTUALIZADO: Integrado con sistema de alarmas offline-first
 
 import React, { useState } from "react";
 import {
@@ -25,9 +25,7 @@ import { auth } from "../../config/firebaseConfig";
 // 🔹 Servicios offline
 import { offlineAuthService } from "../../services/offline/OfflineAuthService";
 import { syncQueueService } from "../../services/offline/SyncQueueService";
-
-// 🔹 Servicio de alarmas de dominio (✅ nuevo)
-import medsAlarmsService from "../../services/alarms/medsAlarmsService";
+import { offlineAlarmService } from "../../services/offline/OfflineAlarmService";
 
 // 🔹 Utils
 import { normalizeTime } from "../../utils/timeUtils";
@@ -45,13 +43,6 @@ import {
 type Nav = StackNavigationProp<RootStackParamList, "AddMedication">;
 type Route = RouteProp<RootStackParamList, "AddMedication">;
 
-function formatHHmm(date: Date) {
-  return date.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export default function AddMedicationScreen({
   navigation,
   route,
@@ -64,13 +55,6 @@ export default function AddMedicationScreen({
   const initialAny: any = initial ?? {};
 
   const isEdit = !!medId;
-
-  // 🔎 Dueño real (paciente o tú mismo)
-  const loggedUid = auth.currentUser?.uid || offlineAuthService.getCurrentUid();
-  const ownerUid = route?.params?.patientUid ?? loggedUid ?? null;
-
-  // 🔐 Permiso para modificar (cuidador read-only no debe editar)
-  const canModify = ownerUid && loggedUid && ownerUid === loggedUid;
 
   const [nombre, setNombre] = useState(initial?.nombre ?? "");
   const [frecuencia, setFrecuencia] = useState(initial?.frecuencia ?? "");
@@ -124,14 +108,6 @@ export default function AddMedicationScreen({
   };
 
   const validate = () => {
-    if (!canModify) {
-      Alert.alert(
-        "Sin permisos",
-        "Solo el paciente puede modificar medicamentos."
-      );
-      return false;
-    }
-
     if (!nombre.trim()) {
       Alert.alert("Falta el nombre", "Ingresa el nombre del medicamento.");
       return false;
@@ -210,7 +186,8 @@ export default function AddMedicationScreen({
   const onSubmit = async () => {
     if (!validate()) return;
 
-    const userId = ownerUid; // ✅ ownerUid ya resuelto offline-first
+    // ✅ Obtener userId de forma offline-first
+    const userId = auth.currentUser?.uid || offlineAuthService.getCurrentUid();
 
     if (!userId) {
       Alert.alert(
@@ -226,6 +203,7 @@ export default function AddMedicationScreen({
       : undefined;
 
     const horaFormatted = hora.trim() ? normalizeTime(hora.trim()) : "";
+
     if (horaFormatted && horaFormatted !== hora) {
       setHora(horaFormatted);
     }
@@ -245,32 +223,58 @@ export default function AddMedicationScreen({
       //  CALCULAR nextDueAt PARA LA PRIMERA ALARMA
       // ============================================
       let nextDueAt: Date | null = null;
+      let alarmId: string | null = null;
 
-      if (horaFormatted) {
+      if (horaFormatted && frecuencia.trim()) {
+        // Parsear hora ingresada "HH:MM"
         const [hours, minutes] = horaFormatted.split(":").map(Number);
 
+        // Crear fecha de primera toma
         const now = new Date();
         const firstDose = new Date();
         firstDose.setHours(hours, minutes, 0, 0);
 
-        if (firstDose <= now) firstDose.setDate(firstDose.getDate() + 1);
+        // Si la hora ya pasó hoy, programar para mañana
+        if (firstDose <= now) {
+          firstDose.setDate(firstDose.getDate() + 1);
+        }
 
         nextDueAt = firstDose;
+
+        // ✅ PROGRAMAR ALARMA usando el servicio offline
+        const result = await offlineAlarmService.scheduleMedicationAlarm(
+          nextDueAt,
+          {
+            nombre: nombre.trim(),
+            dosis: dosisString,
+            imageUri: imageUri || undefined,
+            medId: medicationId,
+            ownerUid: userId,
+            frecuencia: frecuencia.trim(),
+            cantidadActual: cantidadNumber,
+            cantidadPorToma: doseAmountNumber || 1,
+            snoozeCount: 0,
+          }
+        );
+
+        if (result.success) {
+          alarmId = result.notificationId;
+          console.log(`✅ Alarma programada: ${alarmId}`);
+        } else {
+          console.log(`⚠️ No se pudo programar alarma: ${result.error}`);
+        }
       }
 
       // ============================================
       //  PREPARAR DATOS DEL MEDICAMENTO
-      //  (IMPORTANTE: Encolar el doc completo ANTES de programar alarmas)
       // ============================================
       const medicationData: any = {
         id: medicationId,
         nombre: nombre.trim(),
         dosis: dosisString,
         frecuencia: frecuencia.trim(),
-        // Proxima toma guardada como hora visible
-        proximaToma: nextDueAt ? formatHHmm(nextDueAt) : horaFormatted || null,
+        proximaToma: horaFormatted || null,
         nextDueAt: nextDueAt ? nextDueAt.toISOString() : null,
-
         doseAmount: doseAmountNumber,
         doseUnit: doseUnit,
         cantidadPorToma: doseAmountNumber || 1,
@@ -281,33 +285,22 @@ export default function AddMedicationScreen({
         low10Notified: false,
         imageUri: imageUri || undefined,
         takenToday: false,
-
-        // Alarm fields (se setean con medsAlarmsService después)
-        currentAlarmId: initialAny.currentAlarmId ?? null,
+        currentAlarmId: alarmId, // ✅ Guardar ID de la alarma
         snoozeCount: 0,
         snoozedUntil: null,
         lastSnoozeAt: null,
-
         createdAt: isEdit ? undefined : new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         isArchived: false,
       };
 
       // ============================================
-      //  1) CANCELAR ALARMAS ANTERIORES (solo en edit)
+      //  GUARDAR/ACTUALIZAR EN FIRESTORE
       // ============================================
       if (isEdit && medId) {
-        await medsAlarmsService.cancelAllMedAlarmsForItem({
-          ownerUid: userId,
-          medId: medId,
-        });
-      }
+        // Si estamos editando, primero cancelar alarmas anteriores
+        await offlineAlarmService.cancelAllAlarmsForItem(medId, userId);
 
-      // ============================================
-      //  2) ENCOLAR CREATE/UPDATE del doc COMPLETO
-      //     (esto evita UPDATE→CREATE incompleto)
-      // ============================================
-      if (isEdit && medId) {
         await syncQueueService.enqueue(
           "UPDATE",
           "medications",
@@ -325,36 +318,12 @@ export default function AddMedicationScreen({
         );
       }
 
-      // ============================================
-      //  3) PROGRAMAR ALARMA + PERSISTIR currentAlarmId (si aplica)
-      // ============================================
-      let alarmId: string | null = null;
-
-      if (nextDueAt && frecuencia.trim()) {
-        const alarmResult = await medsAlarmsService.scheduleMedAlarmAndPersist({
-          ownerUid: userId,
-          med: {
-            id: medicationId,
-            nombre: medicationData.nombre,
-            dosis: medicationData.dosis,
-            imageUri: medicationData.imageUri,
-            frecuencia: medicationData.frecuencia,
-            cantidadActual: medicationData.cantidadActual,
-            cantidadPorToma: medicationData.cantidadPorToma,
-          },
-          triggerDate: nextDueAt,
-          patientName: route?.params?.patientName,
-        });
-
-        alarmId = alarmResult.alarmId;
-      }
-
       Alert.alert(
         "Listo",
         isEdit
           ? "Medicamento actualizado."
-          : alarmId && nextDueAt
-          ? `Medicamento guardado. Primera alarma programada para ${nextDueAt.toLocaleTimeString(
+          : alarmId
+          ? `Medicamento guardado. Primera alarma programada para ${nextDueAt?.toLocaleTimeString(
               "es-MX",
               {
                 hour: "2-digit",
@@ -362,7 +331,12 @@ export default function AddMedicationScreen({
               }
             )}.`
           : "Medicamento guardado.",
-        [{ text: "OK", onPress: () => navigation.goBack() }]
+        [
+          {
+            text: "OK",
+            onPress: () => navigation.goBack(),
+          },
+        ]
       );
     } catch (e: any) {
       console.log("Error guardando medicamento:", e);
@@ -390,7 +364,8 @@ export default function AddMedicationScreen({
           text: "Eliminar",
           style: "destructive",
           onPress: async () => {
-            const userId = ownerUid;
+            const userId =
+              auth.currentUser?.uid || offlineAuthService.getCurrentUid();
 
             if (!userId) {
               Alert.alert(
@@ -401,11 +376,9 @@ export default function AddMedicationScreen({
             }
 
             try {
-              // ✅ Cancelar alarmas vía servicio de dominio
-              await medsAlarmsService.cancelAllMedAlarmsForItem({
-                ownerUid: userId,
-                medId,
-              });
+              // ✅ CANCELAR TODAS LAS ALARMAS DEL MEDICAMENTO
+              await offlineAlarmService.cancelAllAlarmsForItem(medId, userId);
+              console.log(`🔕 Alarmas del medicamento ${medId} canceladas`);
 
               // Eliminar medicamento
               await syncQueueService.enqueue(
@@ -472,7 +445,7 @@ export default function AddMedicationScreen({
             />
           </TouchableOpacity>
 
-          {/* Preview de imagen */}
+          {/* Preview de imagen si ya se seleccionó */}
           {imageUri ? (
             <View style={styles.previewWrapper}>
               <Image source={{ uri: imageUri }} style={styles.previewImage} />
@@ -491,7 +464,7 @@ export default function AddMedicationScreen({
             />
           </View>
 
-          {/* Hora próxima toma */}
+          {/* Hora de próxima toma (TimePickerField) */}
           <View style={styles.fieldRow}>
             <Text style={styles.label}>Hora próxima toma:</Text>
             <View style={styles.timeRow}>
@@ -504,7 +477,7 @@ export default function AddMedicationScreen({
             </View>
           </View>
 
-          {/* Frecuencia */}
+          {/* Frecuencia: Cada [HH:MM] hrs (TimePickerField) */}
           <View style={styles.fieldRow}>
             <Text style={styles.label}>Cada:</Text>
             <View style={styles.timeRow}>
@@ -518,7 +491,7 @@ export default function AddMedicationScreen({
             </View>
           </View>
 
-          {/* Dosis */}
+          {/* Dosis: cantidad + unidad */}
           <View style={styles.fieldRow}>
             <Text style={styles.label}>Dosis por toma:</Text>
             <View style={styles.doseRow}>
@@ -570,7 +543,7 @@ export default function AddMedicationScreen({
             </View>
           </View>
 
-          {/* Cantidad */}
+          {/* Cantidad disponible */}
           <View style={styles.fieldRow}>
             <Text style={styles.label}>Cantidad disponible:</Text>
             <TextInput
@@ -598,6 +571,7 @@ export default function AddMedicationScreen({
         )}
       </ScrollView>
 
+      {/* Bottom sheet de imagen reutilizable */}
       <ImagePickerSheet
         visible={showImageSheet}
         onClose={() => setShowImageSheet(false)}
@@ -616,11 +590,24 @@ export default function AddMedicationScreen({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
-  container: { flex: 1 },
-  content: { paddingHorizontal: 16, paddingBottom: 24, paddingTop: 0 },
 
-  headerRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
-  title: { fontSize: FONT_SIZES.xlarge, fontWeight: "800", color: COLORS.text },
+  container: { flex: 1 },
+  content: {
+    paddingHorizontal: 16,
+    paddingBottom: 24,
+    paddingTop: 0,
+  },
+
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  title: {
+    fontSize: FONT_SIZES.xlarge,
+    fontWeight: "800",
+    color: COLORS.text,
+  },
   sectionIcon: {
     width: 44,
     height: 44,
@@ -663,11 +650,23 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 3 },
   },
 
-  previewWrapper: { alignItems: "center", marginBottom: 12 },
-  previewImage: { width: 140, height: 90, borderRadius: 8 },
+  previewWrapper: {
+    alignItems: "center",
+    marginTop: 0,
+    marginBottom: 12,
+  },
+  previewImage: {
+    width: 140,
+    height: 90,
+    borderRadius: 8,
+  },
 
-  fieldRow: { marginBottom: 14 },
-  firstFieldRow: { marginTop: 4 },
+  fieldRow: {
+    marginBottom: 14,
+  },
+  firstFieldRow: {
+    marginTop: 4,
+  },
 
   label: {
     color: COLORS.text,
@@ -686,9 +685,15 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
   },
 
-  timeRow: { flexDirection: "row", alignItems: "center", marginTop: 4 },
+  timeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 4,
+  },
 
-  doseRow: { flexDirection: "column" },
+  doseRow: {
+    flexDirection: "column",
+  },
   doseAmountInput: {
     borderWidth: 1,
     borderColor: COLORS.textSecondary,
@@ -723,8 +728,12 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     fontWeight: "600",
   },
-  unitChipTextSmall: { fontSize: FONT_SIZES.small },
-  unitChipTextSelected: { color: COLORS.surface },
+  unitChipTextSmall: {
+    fontSize: FONT_SIZES.small,
+  },
+  unitChipTextSelected: {
+    color: COLORS.surface,
+  },
 
   primaryBtn: {
     backgroundColor: COLORS.primary,
