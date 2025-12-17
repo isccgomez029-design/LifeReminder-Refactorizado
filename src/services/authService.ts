@@ -5,7 +5,7 @@ import {
   signOut as fbSignOut,
   User,
 } from "firebase/auth";
-import { auth } from "../config/firebaseConfig"; 
+import { auth } from "../config/firebaseConfig";
 
 // Tipos de resultado
 type Ok = { success: true; user: User };
