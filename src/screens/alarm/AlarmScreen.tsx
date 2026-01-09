@@ -1,6 +1,5 @@
 // src/screens/alarm/AlarmScreen.tsx
 
-
 import React from "react";
 import {
   View,
@@ -27,8 +26,7 @@ export default function AlarmScreen() {
   const route = useRoute<AlarmRoute>();
   const p = (route.params as any) || {};
 
-  const ownerUid =
-    p.ownerUid || auth.currentUser?.uid || offlineAuthService.getCurrentUid();
+  const ownerUid = p.ownerUid || offlineAuthService.getCurrentUid();
 
   const params: AlarmParams = {
     type: p.type,

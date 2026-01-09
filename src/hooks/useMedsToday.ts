@@ -1,5 +1,4 @@
 // src/hooks/useMedsToday.ts
-// 🪝 Controlador de MedsToday: carga cache + escucha Firestore (si online) + acciones
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert } from "react-native";
@@ -12,12 +11,14 @@ import { auth } from "../config/firebaseConfig";
 import { useOffline } from "../context/OfflineContext";
 
 import medsService, { Medication } from "../services/medsService";
+import { hasPermission } from "../services/careNetworkService";
 
 type Nav = StackNavigationProp<RootStackParamList, "MedsToday">;
 
 type RouteParams = {
   patientUid?: string;
   patientName?: string;
+  accessMode?: "full" | "read-only" | "alerts-only" | "disabled";
 };
 
 export function useMedsToday(args: {
@@ -26,6 +27,9 @@ export function useMedsToday(args: {
 }) {
   const { navigation, routeParams } = args;
   const params = routeParams ?? {};
+
+  const accessMode = params.accessMode ?? "full";
+  const canView = hasPermission(accessMode, "view");
 
   const initialPatientName =
     typeof params.patientName === "string" ? params.patientName : "";
@@ -41,14 +45,51 @@ export function useMedsToday(args: {
 
   const { isOnline, pendingOperations } = useOffline();
 
-  const loggedUserUid =
-    auth.currentUser?.uid || offlineAuthService.getCurrentUid();
+  const loggedUserUid = offlineAuthService.getCurrentUid();
+
   const ownerUid = params.patientUid ?? loggedUserUid ?? null;
 
   const isCaregiverView =
     !!params.patientUid && params.patientUid !== loggedUserUid;
+
+  // ❗ De momento NADIE modifica desde aquí (tal como lo quieres)
   const canModify = ownerUid === loggedUserUid;
 
+  /* ============================================================
+   *  BLOQUEO TOTAL DE LECTURA (alerts-only / disabled)
+   * ============================================================ */
+  if (!canView) {
+    return {
+      // estado
+      loading: false,
+      meds: [],
+      selectedMedId: null,
+      patientName,
+      isOnline,
+      pendingChanges: pendingOperations,
+
+      // permisos
+      ownerUid,
+      canModify: false,
+      isCaregiverView: true,
+      hasSelection: false,
+      blocked: true,
+
+      // acciones NO-OP
+      selectMed: () => {},
+      markTaken: async () => {},
+      addMed: () => {},
+      editSelected: () => {},
+      archiveSelected: () => {},
+
+      // helpers
+      isTaken: () => false,
+    };
+  }
+
+  /* ============================================================
+   * Permisos de modificación (se mantiene tu lógica actual)
+   * ============================================================ */
   const checkModifyPermissions = useCallback(
     (action: string): boolean => {
       if (!canModify) {
@@ -63,13 +104,18 @@ export function useMedsToday(args: {
     [canModify]
   );
 
-  // Tick para cálculos de "tomada"
+  /* ============================================================
+   * Tick para cálculos de "tomada"
+   * ============================================================ */
   useEffect(() => {
     setNow(new Date());
     const id = setInterval(() => setNow(new Date()), 10000);
     return () => clearInterval(id);
   }, []);
 
+  /* ============================================================
+   * Cache offline-first
+   * ============================================================ */
   const reloadFromCache = useCallback(async () => {
     if (!ownerUid) return;
     try {
@@ -83,14 +129,21 @@ export function useMedsToday(args: {
     }
   }, [ownerUid]);
 
-  // ✅ Siempre que entras a la pantalla, refresca cache (offline-first)
   useFocusEffect(
     useCallback(() => {
       reloadFromCache();
     }, [reloadFromCache])
   );
+  useEffect(() => {
+    if (!ownerUid) return;
 
-  // ✅ Suscripción Firestore solo si online
+    if (isOnline && pendingOperations === 0) {
+      reloadFromCache();
+    }
+  }, [isOnline, pendingOperations, ownerUid, reloadFromCache]);
+  /* ============================================================
+   * Firestore realtime (solo si online)
+   * ============================================================ */
   useEffect(() => {
     if (!ownerUid) {
       setLoading(false);
@@ -104,17 +157,14 @@ export function useMedsToday(args: {
       try {
         setLoading(true);
 
-        // 1) Mostrar cache primero (si hay)
         await reloadFromCache();
         if (!mounted) return;
 
-        // 2) Si no hay internet, terminar aquí
         if (!isOnline) {
           setLoading(false);
           return;
         }
 
-        // 3) Firestore real-time
         unsubscribe = medsService.subscribeMedicationsFirestore(
           ownerUid,
           (list) => {
@@ -143,7 +193,9 @@ export function useMedsToday(args: {
     };
   }, [ownerUid, isOnline, reloadFromCache]);
 
-  // ✅ Reprogramar alarmas faltantes cuando llega data (solo online)
+  /* ============================================================
+   * Reprogramar alarmas (solo online)
+   * ============================================================ */
   useEffect(() => {
     if (!ownerUid) return;
     if (!isOnline) return;
@@ -156,6 +208,9 @@ export function useMedsToday(args: {
     });
   }, [meds, isOnline, ownerUid, patientName]);
 
+  /* ============================================================
+   * Acciones
+   * ============================================================ */
   const selectMed = useCallback((id: string) => {
     setSelectedMedId((prev) => (prev === id ? null : id));
   }, []);
@@ -191,21 +246,20 @@ export function useMedsToday(args: {
           patientName,
         });
 
-        // UI update
+        //  Actualizar el estado inmediatamente con el medicamento actualizado
         setMeds((prev) => prev.map((m) => (m.id === med.id ? updatedMed : m)));
+
+        //  Forzar actualización del timestamp para re-calcular isTaken
         setNow(new Date());
 
-        Alert.alert(
-          "¡Listo!",
-          isOnline
-            ? "Se registró la toma."
-            : "Se registró la toma (se sincronizará cuando haya conexión)."
-        );
-      } catch (err) {
+        // Recargar desde cache para asegurar consistencia
+        setTimeout(() => reloadFromCache(), 100);
+      } catch (error) {
+        console.error("Error al marcar medicamento como tomado:", error);
         Alert.alert("Error", "No se pudo registrar la toma.");
       }
     },
-    [ownerUid, checkModifyPermissions, patientName, isOnline]
+    [ownerUid, checkModifyPermissions, patientName, reloadFromCache]
   );
 
   const addMed = useCallback(() => {
@@ -240,40 +294,32 @@ export function useMedsToday(args: {
 
     if (!checkModifyPermissions("archivar")) return;
 
-    Alert.alert(
-      "Archivar medicamento",
-      `¿Deseas archivar "${med.nombre}"? Podrás restaurarlo después si lo necesitas.`,
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Archivar",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              // Optimista UI
-              setMeds((prev) => prev.filter((m) => m.id !== selectedMedId));
-              setSelectedMedId(null);
+    Alert.alert("Archivar medicamento", `¿Deseas archivar "${med.nombre}"?`, [
+      { text: "Cancelar", style: "cancel" },
+      {
+        text: "Archivar",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            // Actualización optimista
+            setMeds((prev) => prev.filter((m) => m.id !== selectedMedId));
+            setSelectedMedId(null);
 
-              await medsService.archiveMedication(ownerUid, med.id, med);
+            await medsService.archiveMedication(ownerUid, med.id, med);
 
-              Alert.alert(
-                "¡Listo!",
-                isOnline
-                  ? "Medicamento archivado correctamente."
-                  : "Se sincronizará cuando haya conexión."
-              );
-            } catch (err) {
-
-              setMeds((prev) =>
-                [...prev, med].sort((a, b) => (a.nombre > b.nombre ? 1 : -1))
-              );
-              Alert.alert("Error", "No se pudo archivar el medicamento.");
-            }
-          },
+            // Sin alerta innecesaria - el cambio es visible inmediatamente
+          } catch (error) {
+            console.error("Error al archivar medicamento:", error);
+            // Revertir cambio optimista si falla
+            setMeds((prev) =>
+              [...prev, med].sort((a, b) => (a.nombre > b.nombre ? 1 : -1))
+            );
+            Alert.alert("Error", "No se pudo archivar el medicamento.");
+          }
         },
-      ]
-    );
-  }, [ownerUid, selectedMedId, meds, checkModifyPermissions, isOnline]);
+      },
+    ]);
+  }, [ownerUid, selectedMedId, meds, checkModifyPermissions]);
 
   const pendingChanges = pendingOperations;
 
@@ -292,6 +338,7 @@ export function useMedsToday(args: {
       canModify,
       isCaregiverView,
       hasSelection,
+      blocked: false,
 
       // actions
       selectMed,

@@ -99,7 +99,7 @@ export function useAddHabit(args: { route: AddHabitRoute }) {
     }
 
     // ✅ offlineAuthService fallback
-    const userId = auth.currentUser?.uid || offlineAuthService.getCurrentUid(); // Toma uid online o el uid cacheado offline
+    const userId = offlineAuthService.getCurrentUid(); // Toma uid online o el uid cacheado offline
     if (!userId) {
       // Si no hay sesión...
       Alert.alert("Error", "Debe iniciar sesión."); // Aviso

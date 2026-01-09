@@ -61,7 +61,7 @@ export interface RegisterParams {
 
 export interface RegisterResult {
   success: boolean;
-  isOffline: boolean; // true si se creó como pending local
+  isOffline: boolean;
   user?: CachedUser;
   error?: string;
   errorCode?: string;
@@ -81,12 +81,21 @@ interface PendingRegistration {
 // ============================================================
 
 const STORAGE_KEYS = {
-  CACHED_USER: "@lifereminder/auth/cached_user",
-  CACHED_CREDENTIALS: "@lifereminder/auth/cached_credentials",
-  CACHED_UID: "@lifereminder/auth/cached_uid",
-  CACHED_PLAINTEXT_CREDS: "@lifereminder/auth/plaintext_creds",
-  PENDING_REGISTRATION: "@lifereminder/auth/pending_registration",
+  USERS_ROOT: "@lifereminder/auth/users",
+  LAST_USER_EMAIL: "@lifereminder/auth/last_user_email",
+
+  PENDING_REGISTRATIONS: "@lifereminder/auth/pending_registrations",
+  LOGOUT_EXPLICIT: "@lifereminder/auth/logout_explicit",
 };
+
+// Helpers para paths por email
+const userKey = (email: string) => `${STORAGE_KEYS.USERS_ROOT}/${email}/user`;
+
+const credentialsKey = (email: string) =>
+  `${STORAGE_KEYS.USERS_ROOT}/${email}/credentials`;
+
+const plaintextKey = (email: string) =>
+  `${STORAGE_KEYS.USERS_ROOT}/${email}/plaintext`;
 
 // offline-first real
 const OFFLINE_SESSION_VALIDITY_MS: number | null = null;
@@ -114,6 +123,7 @@ async function hashPassword(password: string, salt: string): Promise<string> {
 
 function log(message: string, data?: any) {
   const timestamp = new Date().toISOString();
+  console.log(`[OfflineAuth ${timestamp}] ${message}`, data || "");
 }
 
 function isNetOnline(state: {
@@ -145,6 +155,18 @@ export class OfflineAuthService {
     this.initializationPromise = this._doInitialize();
     return this.initializationPromise;
   }
+  private async clearProfileCache(): Promise<void> {
+    try {
+      const keys = await AsyncStorage.getAllKeys();
+      const profileKeys = keys.filter((k) => k.includes("/profile/"));
+
+      if (profileKeys.length > 0) {
+        await AsyncStorage.multiRemove(profileKeys);
+      }
+    } catch {
+      // no-op
+    }
+  }
 
   private async _doInitialize(): Promise<CachedUser | null> {
     await this.loadCachedUid();
@@ -161,12 +183,10 @@ export class OfflineAuthService {
       }
     });
 
-    //  Si hay registro pendiente y estamos online, finalizarlo primero
-    if (this.isOnline) {
-      await this.finalizePendingRegistrationIfAny();
-    }
+    //  1. FINALIZAR REGISTROS OFFLINE PENDIENTES PRIMERO
+    await this.finalizeAllPendingRegistrations();
 
-    //  Restaurar Firebase si aplica
+    //  2. SOLO DESPUÉS intentar restaurar Firebase
     await this.attemptFirebaseRestore();
 
     const cachedUser = await this.restoreSession();
@@ -174,6 +194,7 @@ export class OfflineAuthService {
     this.firebaseAuthUnsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
         await this.cacheUserFromFirebase(user);
+        await AsyncStorage.removeItem(STORAGE_KEYS.LOGOUT_EXPLICIT);
       }
     });
 
@@ -184,22 +205,19 @@ export class OfflineAuthService {
 
   private async loadCachedUid(): Promise<void> {
     try {
-      const uid = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_UID);
-      if (uid) {
-        cachedUidSync = uid;
-
-        return;
-      }
-
-      const userData = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_USER);
-      if (userData) {
-        const user = JSON.parse(userData) as CachedUser;
-        if (user.uid) {
-          cachedUidSync = user.uid;
-          await AsyncStorage.setItem(STORAGE_KEYS.CACHED_UID, user.uid);
+      const email = await AsyncStorage.getItem(STORAGE_KEYS.LAST_USER_EMAIL);
+      if (email) {
+        const userData = await AsyncStorage.getItem(userKey(email));
+        if (userData) {
+          const user = JSON.parse(userData) as CachedUser;
+          if (user.uid) {
+            cachedUidSync = user.uid;
+          }
         }
       }
-    } catch (error) {}
+    } catch (error) {
+      log("Error al cargar UID cacheado", error);
+    }
   }
 
   destroy(): void {
@@ -230,7 +248,6 @@ export class OfflineAuthService {
     const netState = await NetInfo.fetch();
     this.isOnline = isNetOnline(netState);
 
-    // OFFLINE => pending local
     if (!this.isOnline) {
       const res = await this.registerOfflinePending({
         email,
@@ -248,7 +265,7 @@ export class OfflineAuthService {
         };
       }
 
-      const u = await this.getCachedUser();
+      const u = await this.getCachedUser(email);
       return {
         success: true,
         isOffline: true,
@@ -256,7 +273,6 @@ export class OfflineAuthService {
       };
     }
 
-    // ONLINE => Firebase real
     try {
       const cred = await createUserWithEmailAndPassword(auth, email, password);
 
@@ -272,11 +288,25 @@ export class OfflineAuthService {
           updatedAt: serverTimestamp(),
         });
 
-        // siembra offline login (hash + plaintext + cached user/profile)
         await this.persistOfflineLoginAfterRegister(email, password);
+        await AsyncStorage.removeItem(STORAGE_KEYS.LOGOUT_EXPLICIT);
+
+        //sincronizar sesión tras registro ONLINE
+        const cachedUser = await this.getCachedUser(email);
+
+        if (cachedUser) {
+          this.currentUser = cachedUser;
+          cachedUidSync = cachedUser.uid;
+          syncQueueService.setCurrentValidUserId(cachedUser.uid);
+          await syncQueueService.initialize();
+          await syncQueueService.processQueue();
+
+          this.notifyAuthStateListeners(cachedUser);
+        }
       }
 
-      const u = await this.getCachedUser();
+      const u = await this.getCachedUser(email);
+
       return {
         success: true,
         isOffline: false,
@@ -292,7 +322,6 @@ export class OfflineAuthService {
       else if (code === "auth/weak-password")
         msg = "La contraseña es demasiado débil (mínimo 6 caracteres).";
       else if (code === "auth/network-request-failed") {
-        // fallback: si se cayó en el registro, aún puedo hacer pending local
         const fallback = await this.registerOfflinePending({
           email,
           password,
@@ -301,7 +330,7 @@ export class OfflineAuthService {
         });
 
         if (fallback.success) {
-          const u = await this.getCachedUser();
+          const u = await this.getCachedUser(email);
           return {
             success: true,
             isOffline: true,
@@ -381,8 +410,7 @@ export class OfflineAuthService {
     return { ok: true };
   }
 
-  //  REGISTER OFFLINE PENDING
-
+  //  Agregar a cola en lugar de sobrescribir
   async registerOfflinePending(params: {
     email: string;
     password: string;
@@ -402,17 +430,36 @@ export class OfflineAuthService {
       const now = Date.now();
       const tempUid = `temp_${now}_${Math.random().toString(36).slice(2, 9)}`;
 
-      const pending: PendingRegistration = {
-        tempUid,
-        email,
-        password,
-        fullName,
-        username,
-        createdAt: now,
-      };
+      //  Obtener cola existente
+      const queue = await this.getPendingRegistrations();
+
+      //  Verificar si el email ya está en cola
+      const existingIndex = queue.findIndex((p) => p.email === email);
+      if (existingIndex !== -1) {
+        queue[existingIndex] = {
+          tempUid,
+          email,
+          password,
+          fullName,
+          username,
+          createdAt: now,
+        };
+      } else {
+        //  Agregar nuevo registro a la cola
+        queue.push({
+          tempUid,
+          email,
+          password,
+          fullName,
+          username,
+          createdAt: now,
+        });
+      }
+
+      //  Guardar cola actualizada
       await AsyncStorage.setItem(
-        STORAGE_KEYS.PENDING_REGISTRATION,
-        JSON.stringify(pending)
+        STORAGE_KEYS.PENDING_REGISTRATIONS,
+        JSON.stringify(queue)
       );
 
       const localUser: CachedUser = {
@@ -429,21 +476,20 @@ export class OfflineAuthService {
         _lastOnlineLogin: now,
       };
 
-      await AsyncStorage.setItem(
-        STORAGE_KEYS.CACHED_USER,
-        JSON.stringify(localUser)
-      );
-      await AsyncStorage.setItem(STORAGE_KEYS.CACHED_UID, tempUid);
+      await AsyncStorage.setItem(userKey(email), JSON.stringify(localUser));
+      await AsyncStorage.setItem(STORAGE_KEYS.LAST_USER_EMAIL, email);
       cachedUidSync = tempUid;
 
       await this.cacheCredentials(email, password);
       await AsyncStorage.setItem(
-        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
+        plaintextKey(email),
         JSON.stringify({ email, password })
       );
-
       this.currentUser = localUser;
+      cachedUidSync = tempUid;
+      syncQueueService.setCurrentValidUserId(tempUid);
       this.notifyAuthStateListeners(localUser);
+      await syncQueueService.initialize();
 
       return { success: true, tempUid };
     } catch (err: any) {
@@ -451,39 +497,97 @@ export class OfflineAuthService {
     }
   }
 
-  private async getPendingRegistration(): Promise<PendingRegistration | null> {
+  // Obtener todos los registros pendientes
+  private async getPendingRegistrations(): Promise<PendingRegistration[]> {
     try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEYS.PENDING_REGISTRATION);
-      return raw ? (JSON.parse(raw) as PendingRegistration) : null;
+      const raw = await AsyncStorage.getItem(
+        STORAGE_KEYS.PENDING_REGISTRATIONS
+      );
+      return raw ? (JSON.parse(raw) as PendingRegistration[]) : [];
     } catch {
-      return null;
+      return [];
     }
   }
 
-  private async clearPendingRegistration(): Promise<void> {
-    await AsyncStorage.removeItem(STORAGE_KEYS.PENDING_REGISTRATION);
+  //  Eliminar un registro específico de la cola
+  private async removePendingRegistration(tempUid: string): Promise<void> {
+    try {
+      const queue = await this.getPendingRegistrations();
+      const filtered = queue.filter((p) => p.tempUid !== tempUid);
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.PENDING_REGISTRATIONS,
+        JSON.stringify(filtered)
+      );
+    } catch (err) {}
   }
 
-  async finalizePendingRegistrationIfAny(): Promise<void> {
-    if (this.isFinalizingPending) return;
+  //  Limpiar toda la cola
+  private async clearAllPendingRegistrations(): Promise<void> {
+    await AsyncStorage.removeItem(STORAGE_KEYS.PENDING_REGISTRATIONS);
+  }
+
+  // Procesar TODOS los registros pendientes
+  async finalizeAllPendingRegistrations(): Promise<void> {
+    if (this.isFinalizingPending) {
+      return;
+    }
 
     try {
       const netState = await NetInfo.fetch();
       this.isOnline = isNetOnline(netState);
-      if (!this.isOnline) return;
+      if (!this.isOnline) {
+        return;
+      }
 
-      const pending = await this.getPendingRegistration();
-      if (!pending) return;
+      const queue = await this.getPendingRegistrations();
+      if (queue.length === 0) {
+        return;
+      }
 
       this.isFinalizingPending = true;
 
-      if (auth.currentUser) {
-        if ((auth.currentUser.email || "").toLowerCase() === pending.email) {
-          await this.clearPendingRegistration();
+      for (const pending of queue) {
+        try {
+          await this.finalizeSingleRegistration(pending);
+          // Esperar un poco entre registros para evitar rate limiting
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } catch (err) {
+          // Continuar con el siguiente registro incluso si uno falla
         }
-        this.isFinalizingPending = false;
-        return;
       }
+    } catch (err) {
+    } finally {
+      this.isFinalizingPending = false;
+    }
+  }
+
+  //  Finalizar registro pendiente
+  private async finalizeSingleRegistration(
+    pending: PendingRegistration
+  ): Promise<void> {
+    try {
+      // Si Firebase ya tiene sesión activa con el mismo email
+      if (auth.currentUser) {
+        const fbEmail = auth.currentUser.email?.toLowerCase();
+
+        if (fbEmail === pending.email) {
+          // Usuario ya existe, solo limpiar pending y migrar datos
+          const realUid = auth.currentUser.uid;
+          const oldUid = pending.tempUid;
+
+          await syncQueueService.migrateUserNamespace(oldUid, realUid);
+          //ACTUALIZAR UID VÁLIDO ANTES DE PROCESAR COLA
+          syncQueueService.setCurrentValidUserId(realUid);
+          await syncQueueService.initialize();
+
+          await this.cacheUserFromFirebase(auth.currentUser);
+          await this.cacheUserProfile(realUid);
+          await this.removePendingRegistration(pending.tempUid);
+          return;
+        }
+      }
+
+      // 1️ Crear usuario REAL en Firebase
 
       const cred = await createUserWithEmailAndPassword(
         auth,
@@ -505,21 +609,49 @@ export class OfflineAuthService {
       const realUid = cred.user.uid;
       const oldUid = pending.tempUid;
 
+      // 2️⃣ Migrar TODO el namespace offline (meds, habits, queue, etc.)
+
       await syncQueueService.migrateUserNamespace(oldUid, realUid);
 
+      // 3️ Cachear usuario base y perfil
       await this.cacheUserFromFirebase(cred.user);
       await this.cacheUserProfile(realUid);
 
+      // 4️ Obtener usuario FINAL desde cache
+      const email = pending.email.toLowerCase();
+      const cachedUser = await this.getCachedUser(email);
+
+      if (cachedUser) {
+        //  SINCRONIZACIÓN GLOBAL OBLIGATORIA
+        this.currentUser = cachedUser;
+        cachedUidSync = cachedUser.uid;
+        syncQueueService.setCurrentValidUserId(cachedUser.uid);
+        await syncQueueService.initialize();
+        await syncQueueService.processQueue();
+
+        this.notifyAuthStateListeners(cachedUser);
+      }
+
+      // 5️ Persistir credenciales para futuros logins offline
       await this.cacheCredentials(pending.email, pending.password);
       await AsyncStorage.setItem(
-        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
+        plaintextKey(pending.email),
         JSON.stringify({ email: pending.email, password: pending.password })
       );
 
-      await this.clearPendingRegistration();
+      // 6️ Eliminar este registro de la cola
+      await this.removePendingRegistration(pending.tempUid);
     } catch (err: any) {
-    } finally {
-      this.isFinalizingPending = false;
+      const code = err?.code || "";
+
+      // Si el email ya está en uso, eliminar de la cola
+      if (code === "auth/email-already-in-use") {
+        await this.removePendingRegistration(pending.tempUid);
+        return;
+      }
+
+      // Para otros errores, dejar en la cola para reintentar después
+      throw err;
     }
   }
 
@@ -532,7 +664,7 @@ export class OfflineAuthService {
     try {
       await this.cacheCredentials(e, password);
       await AsyncStorage.setItem(
-        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
+        plaintextKey(e),
         JSON.stringify({ email: e, password })
       );
 
@@ -540,7 +672,9 @@ export class OfflineAuthService {
         await this.cacheUserFromFirebase(auth.currentUser);
         await this.cacheUserProfile(auth.currentUser.uid);
       }
-    } catch (err) {}
+    } catch (err) {
+      log("Error en persistOfflineLoginAfterRegister", err);
+    }
   }
 
   async signIn(email: string, password: string): Promise<OfflineAuthResult> {
@@ -598,39 +732,61 @@ export class OfflineAuthService {
     password: string
   ): Promise<OfflineAuthResult> {
     try {
+      // 1️ Login con Firebase
       const result = await signInWithEmailAndPassword(auth, email, password);
-      const user = result.user;
+      const fbUser = result.user;
 
-      await this.cacheUserFromFirebase(user);
+      // 2️ Evitar mezcla de usuarios
+      if (this.currentUser && this.currentUser.uid !== fbUser.uid) {
+        await this.clearAllCache();
+      }
+
+      // 3️ Cachear usuario base
+      await this.cacheUserFromFirebase(fbUser);
+
+      // 4️ Cachear perfil
+      await this.cacheUserProfile(fbUser.uid);
+
+      // 5️ Cachear credenciales
       await this.cacheCredentials(email, password);
-
       await AsyncStorage.setItem(
-        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
+        plaintextKey(email),
         JSON.stringify({ email, password })
       );
 
-      await this.cacheUserProfile(user.uid);
+      // 6️ Obtener usuario completo
+      const cachedUser = await this.getCachedUser(email);
 
-      const cachedUser = await this.getCachedUser();
+      if (cachedUser) {
+        this.currentUser = cachedUser;
+        cachedUidSync = cachedUser.uid;
+        syncQueueService.setCurrentValidUserId(cachedUser.uid);
+        await syncQueueService.initialize();
+        await syncQueueService.processQueue();
+
+        this.notifyAuthStateListeners(cachedUser);
+      }
+
+      await AsyncStorage.removeItem(STORAGE_KEYS.LOGOUT_EXPLICIT);
 
       return {
         success: true,
-        user: cachedUser!,
         isOffline: false,
+        user: cachedUser || undefined,
       };
-    } catch (error: any) {
-      if (
-        error.code === "auth/network-request-failed" ||
-        error.code === "auth/internal-error"
-      ) {
+    } catch (e: any) {
+      const code = e?.code ?? "";
+
+      // Si falla por red, intentar offline
+      if (code === "auth/network-request-failed") {
         return this.signInOffline(email, password);
       }
 
       return {
         success: false,
         isOffline: false,
-        error: this.getErrorMessage(error.code),
-        errorCode: error.code,
+        error: this.getErrorMessage(code),
+        errorCode: code,
       };
     }
   }
@@ -640,164 +796,200 @@ export class OfflineAuthService {
     password: string
   ): Promise<OfflineAuthResult> {
     try {
-      const cached = await this.getCachedCredentials();
+      const cachedCreds = await this.getCachedCredentials(email);
 
-      if (!cached) {
+      if (!cachedCreds) {
         return {
           success: false,
           isOffline: true,
           error:
-            "No hay sesión guardada en este dispositivo. Necesitas internet solo una vez (registro o primer login) para activar el modo offline.",
-          errorCode: "offline/no-cached-credentials",
+            "No puedes iniciar sesión offline porque nunca has iniciado sesión con este correo.",
+          errorCode: "login/no-cached-credentials",
         };
       }
 
-      if (cached.email !== email) {
-        return {
-          success: false,
-          isOffline: true,
-          error: "El correo no coincide con la última sesión guardada.",
-          errorCode: "offline/email-mismatch",
-        };
-      }
+      const inputHash = await hashPassword(password, cachedCreds.salt);
 
-      const passwordHash = await hashPassword(password, cached.salt);
-      if (passwordHash !== cached.passwordHash) {
+      if (inputHash !== cachedCreds.passwordHash) {
         return {
           success: false,
           isOffline: true,
           error: "Contraseña incorrecta.",
-          errorCode: "offline/wrong-password",
+          errorCode: "login/wrong-password",
         };
       }
 
-      const cachedUser = await this.getCachedUser();
+      await this.updateCredentialsLastUsed();
+
+      const cachedUser = await this.getCachedUser(email);
+
       if (!cachedUser) {
         return {
           success: false,
           isOffline: true,
-          error:
-            "No se encontró tu perfil local para esta cuenta. Conéctate a internet una sola vez para reconstruir la sesión en este dispositivo.",
-          errorCode: "offline/no-cached-user",
+          error: "No se pudo recuperar la sesión offline.",
+          errorCode: "login/no-cached-user",
         };
       }
 
-      void OFFLINE_SESSION_VALIDITY_MS;
-
-      await this.updateCredentialsLastUsed();
+      // Evitar mezcla de usuarios
+      if (this.currentUser && this.currentUser.uid !== cachedUser.uid) {
+        await this.clearAllCache();
+      }
 
       this.currentUser = cachedUser;
       cachedUidSync = cachedUser.uid;
+      syncQueueService.setCurrentValidUserId(cachedUser.uid);
+      await syncQueueService.initialize();
+      await syncQueueService.processQueue();
+
       this.notifyAuthStateListeners(cachedUser);
+
+      await AsyncStorage.setItem(STORAGE_KEYS.LAST_USER_EMAIL, email);
+      await AsyncStorage.removeItem(STORAGE_KEYS.LOGOUT_EXPLICIT);
 
       return {
         success: true,
-        user: cachedUser,
         isOffline: true,
+        user: cachedUser,
       };
-    } catch (error: any) {
+    } catch (err: any) {
       return {
         success: false,
         isOffline: true,
         error: "Error al iniciar sesión offline.",
-        errorCode: "offline/unknown-error",
+        errorCode: "login/offline-error",
       };
     }
   }
 
-  async signOut(clearCache: boolean = false): Promise<void> {
+  // ==================== LOGOUT ====================
+
+  async signOut(): Promise<void> {
     try {
-      if (this.isOnline && auth.currentUser) {
+      // Marcar logout explícito
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.LOGOUT_EXPLICIT,
+        new Date().toISOString()
+      );
+
+      // Cerrar sesión en Firebase si existe
+      if (auth.currentUser) {
         await auth.signOut();
       }
 
+      // Limpiar estado local
+      const prevUid = this.currentUser?.uid;
       this.currentUser = null;
-
-      if (clearCache) {
-        await this.clearAllCache();
-        cachedUidSync = null;
-      }
-
+      cachedUidSync = null;
+      syncQueueService.setCurrentValidUserId(null);
+      syncQueueService.destroy();
       this.notifyAuthStateListeners(null);
-    } catch (error) {}
+
+      // NO limpiar cache para permitir login offline
+      // Solo limpiar el LAST_USER_EMAIL para evitar auto-restore
+      await AsyncStorage.removeItem(STORAGE_KEYS.LAST_USER_EMAIL);
+    } catch (error) {
+      throw error;
+    }
   }
 
-  // ==================== RESTORE FIREBASE SESSION ====================
+  // ==================== FIREBASE RESTORE ====================
 
   private async attemptFirebaseRestore(): Promise<void> {
     try {
-      if (auth.currentUser) {
-        return;
-      }
-
-      if (!this.isOnline) {
-        return;
-      }
-
-      const pending = await this.getPendingRegistration();
-      if (pending) {
-        return;
-      }
-
-      const credsJson = await AsyncStorage.getItem(
-        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS
+      // Verificar si hubo logout explícito reciente
+      const logoutStr = await AsyncStorage.getItem(
+        STORAGE_KEYS.LOGOUT_EXPLICIT
       );
-      if (!credsJson) {
+      if (logoutStr) {
+        const logoutTime = new Date(logoutStr).getTime();
+        const now = Date.now();
+        if (now - logoutTime < 60000) {
+          return;
+        }
+      }
+
+      // Solo restaurar si hay usuario en Firebase y coincide con offline
+      if (!auth.currentUser) {
         return;
       }
 
-      const { email, password } = JSON.parse(credsJson);
+      const fbUid = auth.currentUser.uid;
+      const offlineUid = this.getCurrentUid();
 
-      await signInWithEmailAndPassword(auth, email, password);
-    } catch (error: any) {}
+      // Si hay usuario offline y NO coincide → cerrar Firebase
+      if (offlineUid && fbUid !== offlineUid) {
+        await auth.signOut();
+        return;
+      }
+
+      // Si coincide o no hay offline → restaurar
+
+      await this.cacheUserFromFirebase(auth.currentUser);
+      await this.cacheUserProfile(fbUid);
+
+      const email = auth.currentUser.email?.toLowerCase();
+      if (email) {
+        const cachedUser = await this.getCachedUser(email);
+        if (cachedUser) {
+          this.currentUser = cachedUser;
+          cachedUidSync = cachedUser.uid;
+          syncQueueService.setCurrentValidUserId(cachedUser.uid);
+          await syncQueueService.initialize();
+          await syncQueueService.processQueue();
+
+          this.notifyAuthStateListeners(cachedUser);
+        }
+      }
+    } catch (error) {}
   }
 
   // ==================== CACHÉ DE USUARIO ====================
 
   private async cacheUserFromFirebase(user: User): Promise<void> {
     try {
-      const cachedUser: CachedUser = {
+      const email = user.email?.toLowerCase();
+      if (!email) return;
+
+      const now = Date.now();
+      const cached: CachedUser = {
         uid: user.uid,
-        email: user.email || "",
+        email,
         displayName: user.displayName,
         photoURL: user.photoURL,
         emailVerified: user.emailVerified,
-        isPendingRegistration: false,
-        _cachedAt: Date.now(),
-        _lastOnlineLogin: Date.now(),
+        _cachedAt: now,
+        _lastOnlineLogin: now,
       };
 
-      await AsyncStorage.setItem(
-        STORAGE_KEYS.CACHED_USER,
-        JSON.stringify(cachedUser)
-      );
-
-      await AsyncStorage.setItem(STORAGE_KEYS.CACHED_UID, user.uid);
-      cachedUidSync = user.uid;
-
-      this.currentUser = cachedUser;
-      this.notifyAuthStateListeners(cachedUser);
+      await AsyncStorage.setItem(userKey(email), JSON.stringify(cached));
+      await AsyncStorage.setItem(STORAGE_KEYS.LAST_USER_EMAIL, email);
     } catch (error) {}
   }
 
   private async cacheUserProfile(uid: string): Promise<void> {
     try {
-      const collectionsToTry = ["users"];
-      let profileData: Record<string, any> | null = null;
-
-      for (const col of collectionsToTry) {
-        const ref = doc(db, col, uid);
-        const snap = await getDoc(ref);
-        if (snap.exists()) {
-          profileData = snap.data();
-
-          break;
-        }
+      const netState = await NetInfo.fetch();
+      if (!isNetOnline(netState)) {
+        return;
       }
 
-      if (!profileData) return;
+      const profileRef = doc(db, "users", uid);
+      const profileSnap = await getDoc(profileRef);
 
-      const cachedUser = await this.getCachedUser();
+      if (!profileSnap.exists()) {
+        return;
+      }
+
+      const profileData = profileSnap.data();
+      const email = profileData.email?.toLowerCase();
+
+      if (!email) {
+        return;
+      }
+
+      const cachedUser = await this.getCachedUser(email);
       if (!cachedUser) return;
 
       const updatedUser: CachedUser = {
@@ -814,19 +1006,24 @@ export class OfflineAuthService {
         rol: profileData.rol ?? undefined,
       };
 
-      await AsyncStorage.setItem(
-        STORAGE_KEYS.CACHED_USER,
-        JSON.stringify(updatedUser)
-      );
+      await AsyncStorage.setItem(userKey(email), JSON.stringify(updatedUser));
 
       this.currentUser = updatedUser;
       this.notifyAuthStateListeners(updatedUser);
     } catch (error) {}
   }
 
-  async getCachedUser(): Promise<CachedUser | null> {
+  async getCachedUser(email?: string): Promise<CachedUser | null> {
     try {
-      const data = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_USER);
+      let targetEmail = email;
+      if (!targetEmail) {
+        targetEmail =
+          (await AsyncStorage.getItem(STORAGE_KEYS.LAST_USER_EMAIL)) ||
+          undefined;
+      }
+      if (!targetEmail) return null;
+
+      const data = await AsyncStorage.getItem(userKey(targetEmail));
       return data ? JSON.parse(data) : null;
     } catch (error) {
       return null;
@@ -852,15 +1049,25 @@ export class OfflineAuthService {
       };
 
       await AsyncStorage.setItem(
-        STORAGE_KEYS.CACHED_CREDENTIALS,
+        credentialsKey(email),
         JSON.stringify(credentials)
       );
     } catch (error) {}
   }
 
-  private async getCachedCredentials(): Promise<CachedCredentials | null> {
+  private async getCachedCredentials(
+    email?: string
+  ): Promise<CachedCredentials | null> {
     try {
-      const data = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_CREDENTIALS);
+      let targetEmail = email;
+      if (!targetEmail) {
+        targetEmail =
+          (await AsyncStorage.getItem(STORAGE_KEYS.LAST_USER_EMAIL)) ||
+          undefined;
+      }
+      if (!targetEmail) return null;
+
+      const data = await AsyncStorage.getItem(credentialsKey(targetEmail));
       return data ? JSON.parse(data) : null;
     } catch {
       return null;
@@ -869,11 +1076,14 @@ export class OfflineAuthService {
 
   private async updateCredentialsLastUsed(): Promise<void> {
     try {
-      const cached = await this.getCachedCredentials();
+      const email = await AsyncStorage.getItem(STORAGE_KEYS.LAST_USER_EMAIL);
+      if (!email) return;
+
+      const cached = await this.getCachedCredentials(email);
       if (cached) {
         cached._lastUsed = Date.now();
         await AsyncStorage.setItem(
-          STORAGE_KEYS.CACHED_CREDENTIALS,
+          credentialsKey(email),
           JSON.stringify(cached)
         );
       }
@@ -883,39 +1093,62 @@ export class OfflineAuthService {
   // ==================== SESIÓN ====================
 
   private async restoreSession(): Promise<CachedUser | null> {
-    try {
-      if (auth.currentUser) {
-        await this.cacheUserFromFirebase(auth.currentUser);
-        return this.currentUser;
-      }
-
-      const cachedUser = await this.getCachedUser();
-
-      if (cachedUser) {
-        this.currentUser = cachedUser;
-        cachedUidSync = cachedUser.uid;
-        this.notifyAuthStateListeners(cachedUser);
-        return cachedUser;
-      }
-
-      return null;
-    } catch (error) {
+    const email = await AsyncStorage.getItem(STORAGE_KEYS.LAST_USER_EMAIL);
+    if (!email) {
       return null;
     }
+
+    const userRaw = await AsyncStorage.getItem(userKey(email));
+    if (!userRaw) {
+      return null;
+    }
+
+    const user = JSON.parse(userRaw) as CachedUser;
+
+    //si el UID restaurado no coincide, limpiar cache previo
+    if (this.currentUser && this.currentUser.uid !== user.uid) {
+      await this.clearAllCache();
+    }
+
+    this.currentUser = user;
+    cachedUidSync = user.uid;
+    syncQueueService.setCurrentValidUserId(user.uid);
+    this.notifyAuthStateListeners(user);
+
+    return user;
   }
 
   private async syncSessionOnReconnect(): Promise<void> {
     try {
-      await this.finalizePendingRegistrationIfAny();
+      //  Procesar registros pendientes primero
+      await this.finalizeAllPendingRegistrations();
 
-      if (!auth.currentUser) {
-        await this.attemptFirebaseRestore();
+      const offlineUid = this.getCurrentUid();
+
+      // Si no hay usuario offline se permitira  Firebase
+      if (!offlineUid) {
+        if (!auth.currentUser) {
+          await this.attemptFirebaseRestore();
+        }
+        return;
       }
 
-      if (auth.currentUser) {
+      //  Firebase tiene sesión pero NO coincide → BLOQUEAR
+      if (auth.currentUser && auth.currentUser.uid !== offlineUid) {
+        await auth.signOut();
+        return;
+      }
+
+      //  UID coincide → sincronizar con seguridad
+      if (auth.currentUser && auth.currentUser.uid === offlineUid) {
         await auth.currentUser.reload();
         await this.cacheUserFromFirebase(auth.currentUser);
         await this.cacheUserProfile(auth.currentUser.uid);
+      }
+      const uid = this.getCurrentUid();
+      if (uid) {
+        await syncQueueService.initialize();
+        await syncQueueService.processQueue();
       }
     } catch (error) {}
   }
@@ -924,13 +1157,21 @@ export class OfflineAuthService {
 
   async clearAllCache(): Promise<void> {
     try {
-      await AsyncStorage.multiRemove([
-        STORAGE_KEYS.CACHED_USER,
-        STORAGE_KEYS.CACHED_CREDENTIALS,
-        STORAGE_KEYS.CACHED_UID,
-        STORAGE_KEYS.CACHED_PLAINTEXT_CREDS,
-        STORAGE_KEYS.PENDING_REGISTRATION,
-      ]);
+      const email = await AsyncStorage.getItem(STORAGE_KEYS.LAST_USER_EMAIL);
+      const keysToRemove = [
+        STORAGE_KEYS.LAST_USER_EMAIL,
+        STORAGE_KEYS.PENDING_REGISTRATIONS,
+      ];
+
+      if (email) {
+        keysToRemove.push(
+          userKey(email),
+          credentialsKey(email),
+          plaintextKey(email)
+        );
+      }
+
+      await AsyncStorage.multiRemove(keysToRemove);
       this.currentUser = null;
       cachedUidSync = null;
     } catch (error) {}
@@ -949,9 +1190,24 @@ export class OfflineAuthService {
   }
 
   getCurrentUid(): string | null {
-    if (auth.currentUser?.uid) return auth.currentUser.uid;
-    if (this.currentUser?.uid) return this.currentUser.uid;
-    if (cachedUidSync) return cachedUidSync;
+    //  1. Fuente de verdad ABSOLUTA: SyncQueue
+    const validUid = syncQueueService.getCurrentValidUserId();
+    if (validUid) {
+      return validUid;
+    }
+
+    //  2. Usuario offline en memoria (controlado por OfflineAuthService)
+    if (this.currentUser?.uid) {
+      return this.currentUser.uid;
+    }
+
+    //  3. Fallback extremo: Firebase Auth
+    //  Solo se usa si todo lo demás falló
+    if (auth.currentUser?.uid) {
+      return auth.currentUser.uid;
+    }
+
+    //  4. No hay UID válido
     return null;
   }
 
@@ -960,22 +1216,21 @@ export class OfflineAuthService {
     if (syncUid) return syncUid;
 
     try {
-      const uid = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_UID);
-      if (uid) {
-        cachedUidSync = uid;
-        return uid;
-      }
-
-      const userData = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_USER);
-      if (userData) {
-        const user = JSON.parse(userData) as CachedUser;
-        if (user.uid) {
-          cachedUidSync = user.uid;
-          this.currentUser = user;
-          return user.uid;
+      const email = await AsyncStorage.getItem(STORAGE_KEYS.LAST_USER_EMAIL);
+      if (email) {
+        const userData = await AsyncStorage.getItem(userKey(email));
+        if (userData) {
+          const user = JSON.parse(userData) as CachedUser;
+          if (user.uid) {
+            cachedUidSync = user.uid;
+            this.currentUser = user;
+            return user.uid;
+          }
         }
       }
-    } catch (error) {}
+    } catch (error) {
+      log("❌ Error en getCurrentUidAsync", error);
+    }
 
     return null;
   }
@@ -1012,7 +1267,6 @@ export class OfflineAuthService {
   ): () => void {
     this.authStateListeners.add(callback);
     callback(this.currentUser);
-    3;
     return () => this.authStateListeners.delete(callback);
   }
 

@@ -2,18 +2,18 @@
 
 import React, {
   createContext,
-  useContext, 
+  useContext,
   useEffect,
-  useState, 
+  useState,
   useCallback,
-  ReactNode, 
+  ReactNode,
 } from "react";
 import NetInfo, { NetInfoState } from "@react-native-community/netinfo";
 // NetInfo permite detectar cambios de conectividad en React Native
 
 import { syncQueueService } from "../services/offline/SyncQueueService";
 // Servicio que maneja la cola de operaciones offline pendientes
-
+import { offlineAuthService } from "../services/offline/OfflineAuthService";
 interface OfflineContextValue {
   isOnline: boolean; // Indica si el dispositivo tiene conexión a internet
   pendingOperations: number; // Número de operaciones pendientes en la cola offline
@@ -61,24 +61,28 @@ export function OfflineProvider(
   /* Función para sincronizar manualmente */
 
   const syncNow = useCallback(async () => {
-    // Evita sincronizar si ya hay un proceso activo o si no hay internet
     if (isSyncing || !isOnline) return;
 
-    setIsSyncing(true); // Marca que la sincronización comenzó
+    setIsSyncing(true);
     try {
-      // Procesa la cola de operaciones offline (CREATE, UPDATE, DELETE)
-      await syncQueueService.processQueue();
+      console.log("🔄 OfflineContext: Iniciando sincronización...");
 
-      // Obtiene el número actualizado de operaciones pendientes
+      // 🆕 PASO 1: Verificar y finalizar registros pendientes PRIMERO
+      try {
+        await offlineAuthService.finalizeAllPendingRegistrations();
+      } catch (error) {
+        // Continuar con la sincronización incluso si falla
+      }
+
+      // PASO 2: Procesar la cola de operaciones
+      const result = await syncQueueService.processQueue();
+
       const count = await syncQueueService.getPendingCount();
-      setPendingOperations(count); // Actualiza el estado
-
-      // Guarda la fecha de la última sincronización exitosa
+      setPendingOperations(count);
       setLastSyncTime(new Date());
-    } catch {
-      // Fallo silencioso: no se rompe la app si algo falla
+    } catch (error) {
     } finally {
-      setIsSyncing(false); // Finaliza el estado de sincronización
+      setIsSyncing(false);
     }
   }, [isSyncing, isOnline]);
 

@@ -1,6 +1,5 @@
 // src/services/profileService.ts
 
-
 import { auth, db } from "../config/firebaseConfig";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import {
@@ -51,21 +50,38 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+/**
+ *  VERSIÓN CORREGIDA
+ *
+ * Ahora devuelve AMBOS usuarios:
+ * - firebaseUser: Siempre disponible si Firebase Auth tiene sesión (para cambios de email/contraseña)
+ * - offlineUser: Usuario offline activo (prioridad para datos de perfil)
+ * - userId: Prioriza offline, luego firebase
+ */
 export function getCurrentAuthInfo() {
-  const firebaseUser = auth.currentUser;
   const offlineUser = offlineAuthService.getCurrentUser();
+  const offlineUid = offlineAuthService.getCurrentUid();
 
-  const userId =
-    firebaseUser?.uid || offlineAuthService.getCurrentUid() || null;
-  const userEmail = firebaseUser?.email || offlineUser?.email || "";
+  // SIEMPRE obtener Firebase User (para operaciones de seguridad)
+  const firebaseUser = auth.currentUser;
+
+  // Priorizar offline para userId y datos de perfil
+  const userId = offlineUid || firebaseUser?.uid || null;
+  const userEmail = offlineUser?.email || firebaseUser?.email || "";
   const displayNameFallback =
-    firebaseUser?.displayName || offlineUser?.displayName || "";
+    offlineUser?.displayName || firebaseUser?.displayName || "";
 
-  return { firebaseUser, offlineUser, userId, userEmail, displayNameFallback };
+  return {
+    firebaseUser, // Ahora siempre disponible cuando existe sesión en Firebase
+    offlineUser, // Usuario offline (puede ser null)
+    userId, // Prioriza offline, luego firebase
+    userEmail, // Prioriza offline, luego firebase
+    displayNameFallback, // Prioriza offline, luego firebase
+  };
 }
 
 /**
- *  OFFLINE-FIRSTL:
+ *  OFFLINE-FIRST:
  * 1) Retorna cache inmediato (sin colgar)
  * 2) Si hay internet, hace getDoc en background con timeout
  * 3) Si llega remoto, actualiza cache (la UI puede re-leer luego)
@@ -73,6 +89,12 @@ export function getCurrentAuthInfo() {
 export async function loadProfileOfflineFirst(
   userId: string
 ): Promise<any | null> {
+  //  VALIDACIÓN CRÍTICA: solo permitir el UID activo
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (validUid && userId !== validUid) {
+    return null;
+  }
+
   // 1) cache (rápido)
   let data: any | null = null;
   try {
@@ -83,9 +105,13 @@ export async function loadProfileOfflineFirst(
     // no-op
   }
 
-  //  Firestore en background 
+  // 2) Firestore en background (PROTEGIDO)
   void (async () => {
     try {
+      //  Revalidar UID antes de tocar red
+      const stillValidUid = syncQueueService.getCurrentValidUserId();
+      if (!stillValidUid || stillValidUid !== userId) return;
+
       const online = await syncQueueService.checkConnection();
       if (!online) return;
 
@@ -93,15 +119,12 @@ export async function loadProfileOfflineFirst(
       const snap = await withTimeout(getDoc(userRef), 2000);
 
       if (snap.exists()) {
-        const remote = snap.data();
-
-
         await syncQueueService.saveToCache("profile", userId, [
-          { ...remote, id: userId },
+          { ...snap.data(), id: userId },
         ]);
       }
     } catch {
-
+      // silencioso
     }
   })();
 
@@ -114,7 +137,14 @@ export async function saveProfileOfflineFirst(args: {
 }): Promise<void> {
   const { userId, profileData } = args;
 
-  // enqueue (offline-first)
+  //  VALIDACIÓN CRÍTICA: solo permitir escribir para el UID activo
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== userId) {
+    //  Evita escribir perfil de otro usuario
+    return;
+  }
+
+  // 1️ Encolar operación (offline-first)
   await syncQueueService.enqueue(
     "UPDATE",
     "profile",
@@ -123,9 +153,8 @@ export async function saveProfileOfflineFirst(args: {
     profileData
   );
 
-  // actualizar cache local para que se vea al instante
+  // 2️ Actualizar cache local inmediatamente (solo UID válido)
   try {
-
     await syncQueueService.saveToCache("profile", userId, [
       { ...profileData, id: userId },
     ]);
@@ -133,8 +162,11 @@ export async function saveProfileOfflineFirst(args: {
     // no-op
   }
 
-  // intento directo Firestore (si hay conexión)
+  // 3️ Intento directo a Firestore (si hay conexión) – PROTEGIDO
   try {
+    const stillValidUid = syncQueueService.getCurrentValidUserId();
+    if (!stillValidUid || stillValidUid !== userId) return;
+
     const userRef = doc(db, "users", userId);
     await setDoc(userRef, profileData, { merge: true });
   } catch {
@@ -142,6 +174,10 @@ export async function saveProfileOfflineFirst(args: {
   }
 }
 
+/**
+ *  Cambiar email (solo online)
+ * Requiere firebaseUser y conexión a internet
+ */
 export async function changeEmailOnline(args: {
   firebaseUser: User;
   newEmail: string;
@@ -149,15 +185,21 @@ export async function changeEmailOnline(args: {
 }): Promise<void> {
   const { firebaseUser, newEmail, currentPassword } = args;
 
-  if (!firebaseUser?.email) throw new Error("NO_EMAIL");
+  if (!firebaseUser?.email) {
+    throw new Error("NO_EMAIL");
+  }
 
+  // Reautenticar con contraseña actual
   const cred = EmailAuthProvider.credential(
     firebaseUser.email,
     currentPassword
   );
   await reauthenticateWithCredential(firebaseUser, cred);
+
+  // Actualizar email en Firebase Auth
   await updateEmail(firebaseUser, newEmail);
 
+  // Actualizar email en Firestore
   const userRef = doc(db, "users", firebaseUser.uid);
   await setDoc(
     userRef,
@@ -166,6 +208,10 @@ export async function changeEmailOnline(args: {
   );
 }
 
+/**
+ *  Cambiar contraseña (solo online)
+ * Requiere firebaseUser y conexión a internet
+ */
 export async function changePasswordOnline(args: {
   firebaseUser: User;
   currentPassword: string;
@@ -173,12 +219,17 @@ export async function changePasswordOnline(args: {
 }): Promise<void> {
   const { firebaseUser, currentPassword, newPassword } = args;
 
-  if (!firebaseUser?.email) throw new Error("NO_EMAIL");
+  if (!firebaseUser?.email) {
+    throw new Error("NO_EMAIL");
+  }
 
+  // Reautenticar con contraseña actual
   const cred = EmailAuthProvider.credential(
     firebaseUser.email,
     currentPassword
   );
   await reauthenticateWithCredential(firebaseUser, cred);
+
+  // Actualizar contraseña en Firebase Auth
   await updatePassword(firebaseUser, newPassword);
 }

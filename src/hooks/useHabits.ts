@@ -1,26 +1,45 @@
 // src/hooks/useHabits.ts
-//  Hook: lógica de NewReminderScreen (cache + Firestore + offline + acciones)
+// Hook: lógica de NewReminderScreen (cache + Firestore + offline + acciones)
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
-import { useFocusEffect, RouteProp } from "@react-navigation/native";
+import { useFocusEffect } from "@react-navigation/native";
 import { StackNavigationProp } from "@react-navigation/stack";
 
 import { RootStackParamList } from "../navigation/StackNavigator";
 import { offlineAuthService } from "../services/offline/OfflineAuthService";
 import { auth, db } from "../config/firebaseConfig";
-import { collection, query, onSnapshot, orderBy } from "firebase/firestore";
+import { collection, query, onSnapshot } from "firebase/firestore";
 
 import { type HabitWithArchive } from "../services/habitsService";
 import { syncQueueService } from "../services/offline/SyncQueueService";
 import { archiveHabit } from "../utils/archiveHelpers";
+import { hasPermission } from "../services/careNetworkService";
 
 type Nav = StackNavigationProp<RootStackParamList, "NewReminder">;
-type Route = RouteProp<RootStackParamList, "NewReminder">;
 
-export function useHabits(args: { navigation: Nav; route: Route }) {
-  const { navigation, route } = args;
+/* ============================================================
+ * RouteParams PROPIOS (igual que Meds)
+ * ============================================================ */
+type RouteParams = {
+  patientUid?: string;
+  patientName?: string;
+  accessMode?: "full" | "read-only" | "alerts-only" | "disabled";
+};
+
+export function useHabits(args: {
+  navigation: Nav;
+  routeParams?: RouteParams;
+}) {
+  const { navigation, routeParams } = args;
+  const params = routeParams ?? {};
+
+  /* ============================================================
+   * PERMISOS (MISMO PATRÓN QUE MEDS)
+   * ============================================================ */
+  const accessMode = params.accessMode ?? "full";
+  const canView = hasPermission(accessMode, "view");
 
   const [habits, setHabits] = useState<HabitWithArchive[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -30,13 +49,14 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
   const [loading, setLoading] = useState(true);
 
   // 🔑 dueño real (paciente o usuario logueado)
-  const loggedUserUid =
-    auth.currentUser?.uid || offlineAuthService.getCurrentUid();
-  const ownerUid = route.params?.patientUid ?? loggedUserUid ?? null;
+  const loggedUserUid = offlineAuthService.getCurrentUid();
+
+  const ownerUid = params.patientUid ?? loggedUserUid ?? null;
 
   const isCaregiverView =
-    !!route.params?.patientUid && route.params.patientUid !== loggedUserUid;
+    !!params.patientUid && params.patientUid !== loggedUserUid;
 
+  // ❗ igual que meds: solo el dueño puede modificar
   const canModify = ownerUid === loggedUserUid;
 
   const selectedHabit = useMemo(
@@ -44,6 +64,36 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
     [habits, selectedId]
   );
 
+  /* ============================================================
+   *  BLOQUEO TOTAL DE LECTURA (alerts-only / disabled)
+   * ============================================================ */
+  if (!canView) {
+    return {
+      // state
+      habits: [],
+      selectedId: null,
+      selectedHabit: null,
+      loading: false,
+      isOnline,
+      pendingChanges,
+
+      // permissions
+      ownerUid,
+      canModify: false,
+      isCaregiverView: true,
+      blocked: true,
+
+      // actions NO-OP
+      toggleSelect: () => {},
+      onAdd: () => {},
+      onEdit: () => {},
+      onArchive: () => {},
+    };
+  }
+
+  /* ============================================================
+   * Cache offline-first
+   * ============================================================ */
   const reloadFromCache = useCallback(async () => {
     if (!ownerUid) return;
 
@@ -63,14 +113,15 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
     }
   }, [ownerUid]);
 
-  //  refrescar cache cuando vuelves a la pantalla
   useFocusEffect(
     useCallback(() => {
       reloadFromCache();
     }, [reloadFromCache])
   );
 
-  // ================== CONNECTIVITY MONITOR ==================
+  /* ============================================================
+   * CONNECTIVITY MONITOR
+   * ============================================================ */
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener((state) => {
       const online =
@@ -89,7 +140,17 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
     return () => unsubscribe();
   }, []);
 
-  // ================== Cargar hábitos (cache → Firestore) ==================
+  // recargar hábitos cuando termina el sync offline
+  useEffect(() => {
+    if (!ownerUid) return;
+
+    if (isOnline && pendingChanges === 0) {
+      reloadFromCache();
+    }
+  }, [isOnline, pendingChanges, ownerUid, reloadFromCache]);
+
+  // Cargar hábitos (cache → Firestore)
+
   useEffect(() => {
     const userId = ownerUid;
     if (!userId) {
@@ -128,11 +189,8 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
           setLoading(false);
         }
 
-        // 2) Firestore listener (si falla, cache ya está)
+        // 2) Firestore realtime
         const habitsRef = collection(db, "users", userId, "habits");
-
-        // Si quieres ordenar por nombre en server, puedes usar orderBy("name")
-        // (si no tienes índice, quítalo). Te lo dejo seguro:
         const q = query(habitsRef);
 
         unsubscribe = onSnapshot(
@@ -178,6 +236,9 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
     };
   }, [ownerUid]);
 
+  /* ============================================================
+   * Acciones
+   * ============================================================ */
   const onAdd = useCallback(() => {
     if (!canModify) {
       Alert.alert(
@@ -241,11 +302,9 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
             try {
               if (!ownerUid) return;
 
-              // Optimistic UI
               setHabits((prev) => prev.filter((h) => h.id !== habitId));
               setSelectedId(null);
 
-              // ✅ Encola UPDATE isArchived + cache merge
               await archiveHabit(ownerUid, habitId, habit);
 
               setPendingChanges(await syncQueueService.getPendingCount());
@@ -258,7 +317,6 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
               );
             } catch (e: any) {
               Alert.alert("Error", e?.message ?? "Intenta nuevamente.");
-              // rollback UI
               if (habit) setHabits((prev) => [...prev, habit]);
             }
           },
@@ -285,6 +343,7 @@ export function useHabits(args: { navigation: Nav; route: Route }) {
       ownerUid,
       canModify,
       isCaregiverView,
+      blocked: false,
 
       // actions
       toggleSelect,

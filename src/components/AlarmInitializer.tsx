@@ -10,7 +10,7 @@ import { syncQueueService } from "../services/offline/SyncQueueService";
 import { auth } from "../config/firebaseConfig";
 
 Notifications.setNotificationHandler({
-  // Configura cómo se muestran las notificaciones cuando llegan 
+  // Configura cómo se muestran las notificaciones cuando llegan
   handleNotification: async () => ({
     // Handler ejecutado por Expo al recibir una notificación
     shouldShowAlert: true, // Mostrar alerta/overlay
@@ -87,7 +87,8 @@ export function AlarmInitializer() {
 
   const getOwnerUid = () =>
     // Función helper para obtener el UID del usuario dueño
-    auth.currentUser?.uid || offlineAuthService.getCurrentUid(); // Usa Firebase si existe, si no usa sesión offline
+    offlineAuthService.getCurrentUid();
+  // Usa Firebase si existe, si no usa sesión offline
 
   /**
    *  Garantiza que TODA próxima alarma (nextDueAt futura) tenga
@@ -176,9 +177,7 @@ export function AlarmInitializer() {
                 patch // Payload (nuevo alarmId)
               );
             }
-          } catch {
-
-          }
+          } catch {}
         }
       }
 

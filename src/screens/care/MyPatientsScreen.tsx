@@ -43,6 +43,7 @@ export default function MyPatientsScreen({ navigation }: Props) {
       {
         patientUid: p.ownerUid,
         patientName: p.ownerName,
+        accessMode: p.accessMode,
       } as any
     );
   };
@@ -51,8 +52,6 @@ export default function MyPatientsScreen({ navigation }: Props) {
     // ⚠️ Asegúrate que esta ruta exista en tu StackNavigator/RootStackParamList
     navigation.navigate("CaregiverNotifications" as any);
   };
-
-
 
   const renderPatientCard = (p: PatientLink) => {
     const photoUri = profilePhotos[p.ownerUid];
@@ -138,8 +137,6 @@ export default function MyPatientsScreen({ navigation }: Props) {
     </View>
   );
 
-
-
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView
@@ -190,7 +187,6 @@ export default function MyPatientsScreen({ navigation }: Props) {
     </SafeAreaView>
   );
 }
-
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },

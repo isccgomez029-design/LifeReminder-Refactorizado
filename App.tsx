@@ -6,26 +6,29 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import * as Notifications from "expo-notifications";
 import NetInfo from "@react-native-community/netinfo";
 
-import StackNavigator from "./src/navigation/StackNavigator";
-import { configureNotificationPermissions } from "./src/services/Notifications";
+// 🔀 Stacks
+import { AuthStack, AppStack } from "./src/navigation/StackNavigator";
 import { navigationRef } from "./src/navigation/navigationRef";
 
-// Servicios Offline
-import { offlineAuthService } from "./src/services/offline/OfflineAuthService";
+// 🔔 Servicios
+import { configureNotificationPermissions } from "./src/services/Notifications";
+import {
+  offlineAuthService,
+  type CachedUser,
+} from "./src/services/offline/OfflineAuthService";
 import { syncQueueService } from "./src/services/offline/SyncQueueService";
-
-//  Contexto de conectividad
-import { OfflineProvider } from "./src/context/OfflineContext";
-import { auth } from "./src/config/firebaseConfig";
 import { offlineAlarmService } from "./src/services/offline/OfflineAlarmService";
+
+// 🌐 Contexto
+import { OfflineProvider } from "./src/context/OfflineContext";
+
+// ⏰ Alarmas
 import {
   shouldShowAlarm,
   performAlarmMaintenance,
   cleanupArchivedItemAlarms,
 } from "./src/services/alarmValidator";
 import { AlarmInitializer } from "./src/components/AlarmInitializer";
-
-import type { RootStackParamList } from "./src/navigation/StackNavigator";
 
 const COLORS = {
   primary: "#6366F1",
@@ -37,52 +40,51 @@ export default function App() {
   const [isInitializing, setIsInitializing] = useState(true);
   const [initError, setInitError] = useState<string | null>(null);
 
-  //  RUTA INICIAL DINÁMICA
-  const [initialRoute, setInitialRoute] =
-    useState<keyof RootStackParamList>("Login");
+  // 🔑 Estado real de auth (offline + online)
+  const [user, setUser] = useState<CachedUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
+    let unsubscribeAuth: (() => void) | null = null;
 
     const initializeApp = async () => {
       try {
-        // Permisos de notificaciones
+        // 1️⃣ Permisos de notificaciones
         await configureNotificationPermissions();
 
-        //  Inicializar auth offline-first
-        const cachedUser = await offlineAuthService.initialize();
+        // 2️⃣ Inicializar auth offline-first
+        await offlineAuthService.initialize();
 
-        //  Inicializar cola offline
+        // 3️⃣ Listener reactivo de sesión (CLAVE)
+        unsubscribeAuth = offlineAuthService.addAuthStateListener((u) => {
+          if (!isMounted) return;
+          setUser(u);
+          setAuthReady(true);
+        });
+
+        // 4️⃣ Inicializar cola offline
         await syncQueueService.initialize();
 
-        //  Inicializar sistema de alarmas
+        // 5️⃣ Inicializar alarmas offline
         await offlineAlarmService.initialize();
 
+        // 6️⃣ Mantenimiento de alarmas
         await performAlarmMaintenance();
 
-        //  DECISIÓN DE ARRANQUE
-        if (cachedUser) {
-          setInitialRoute("Home");
-          await syncQueueService.debugCache(cachedUser.uid);
-        } else {
-          setInitialRoute("Login");
+        // 7️⃣ Limpieza de alarmas huérfanas
+        const uid = offlineAuthService.getCurrentUid();
+        if (uid) {
+          await cleanupArchivedItemAlarms(uid);
         }
 
-        //  Limpiar alarmas huérfanas
-        const userId =
-          auth.currentUser?.uid || offlineAuthService.getCurrentUid();
-
-        if (userId) {
-          await cleanupArchivedItemAlarms(userId);
-        }
-
-        // (solo para forzar evaluación inicial de red)
+        // 8️⃣ Forzar evaluación inicial de red
         await NetInfo.fetch();
 
         if (isMounted) setIsInitializing(false);
       } catch (error: any) {
         if (isMounted) {
-          setInitError(error.message || "Error de inicialización");
+          setInitError(error?.message ?? "Error de inicialización");
           setIsInitializing(false);
         }
       }
@@ -90,12 +92,11 @@ export default function App() {
 
     initializeApp();
 
-    // Listener: notificación tocada (background)
+    // 🔔 Notificación tocada (background)
     const responseListener =
       Notifications.addNotificationResponseReceivedListener(
         async (response) => {
           const data = response.notification.request.content.data;
-
           if (data?.screen === "Alarm") {
             const { shouldShow } = await shouldShowAlarm(data);
             if (shouldShow) {
@@ -105,11 +106,10 @@ export default function App() {
         }
       );
 
-    // Listener: notificación recibida (foreground)
+    // 🔔 Notificación recibida (foreground)
     const notificationListener = Notifications.addNotificationReceivedListener(
       async (notification) => {
         const data = notification.request.content.data;
-
         if (data?.screen === "Alarm") {
           const { shouldShow } = await shouldShowAlarm(data);
           if (shouldShow) {
@@ -119,9 +119,9 @@ export default function App() {
       }
     );
 
-    // Cleanup
     return () => {
       isMounted = false;
+      unsubscribeAuth?.();
       responseListener.remove();
       notificationListener.remove();
       offlineAuthService.destroy();
@@ -129,8 +129,8 @@ export default function App() {
     };
   }, []);
 
-  //  Splash / loading
-  if (isInitializing) {
+  // 🟡 Splash / loading
+  if (isInitializing || !authReady) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
@@ -139,27 +139,27 @@ export default function App() {
     );
   }
 
-  //  Error de arranque
+  // 🔴 Error crítico
   if (initError) {
     return (
       <View style={styles.errorContainer}>
         <Text style={styles.errorIcon}>⚠️</Text>
-        <Text style={styles.errorTitle}>Error de Inicialización</Text>
+        <Text style={styles.errorTitle}>Error de inicialización</Text>
         <Text style={styles.errorText}>{initError}</Text>
         <Text style={styles.errorHint}>
-          Intenta cerrar y volver a abrir la aplicación
+          Cierra y vuelve a abrir la aplicación
         </Text>
       </View>
     );
   }
 
-  // APP NORMAL
+  // ✅ APP FINAL
   return (
     <OfflineProvider>
       <SafeAreaProvider>
         <NavigationContainer ref={navigationRef}>
           <AlarmInitializer />
-          <StackNavigator initialRoute={initialRoute} />
+          {user ? <AppStack /> : <AuthStack />}
         </NavigationContainer>
       </SafeAreaProvider>
     </OfflineProvider>

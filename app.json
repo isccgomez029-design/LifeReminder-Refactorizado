@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
 
-    "icon": "./assets/login_image.png",
+    "icon": "./assets/icon.png",
 
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
@@ -26,12 +26,12 @@
 
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#0F766E"
       },
 
       "notification": {
-        "icon": "./assets/login_image.png",
+        "icon": "./assets/notificaciones.png",
         "color": "#0F766E"
       },
 

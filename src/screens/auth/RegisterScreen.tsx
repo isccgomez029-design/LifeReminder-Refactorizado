@@ -49,14 +49,12 @@ export default function RegisterScreen({ navigation }: { navigation: Nav }) {
         Alert.alert(
           "Registro offline creado",
           "Tu cuenta se creó en este dispositivo. Cuando tengas internet se completará automáticamente.",
-          [{ text: "Continuar", onPress: () => navigation.replace("Home") }]
+          [{ text: "Continuar" }]
         );
         return;
       }
 
-      Alert.alert("Cuenta creada", "Tu registro se realizó correctamente.", [
-        { text: "Continuar", onPress: () => navigation.replace("Home") },
-      ]);
+      Alert.alert("Cuenta creada", "Tu registro se realizó correctamente.");
     } finally {
       setIsLoading(false);
     }

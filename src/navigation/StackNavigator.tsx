@@ -159,17 +159,27 @@ function LogoTitle() {
 }
 
 /* ====================================================
-   STACK NAVIGATOR
+   AUTH STACK (SIN HEADER)
 ==================================================== */
 
-type StackNavigatorProps = {
-  initialRoute: keyof RootStackParamList;
-};
+export function AuthStack() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="Login" component={LoginScreen} />
+      <Stack.Screen name="Register" component={RegisterScreen} />
+      <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
+      <Stack.Screen name="ResetPassword" component={ResetPasswordScreen} />
+    </Stack.Navigator>
+  );
+}
 
-export default function StackNavigator({ initialRoute }: StackNavigatorProps) {
+/* ====================================================
+   APP STACK (CON HEADER)
+==================================================== */
+
+export function AppStack() {
   return (
     <Stack.Navigator
-      initialRouteName={initialRoute}
       screenOptions={{
         headerStyle: { backgroundColor: COLORS.primary },
         headerTintColor: "#fff",
@@ -179,29 +189,6 @@ export default function StackNavigator({ initialRoute }: StackNavigatorProps) {
         headerRightContainerStyle: { paddingRight: 12 },
       }}
     >
-      {/* ===== AUTH ===== */}
-      <Stack.Screen
-        name="Login"
-        component={LoginScreen}
-        options={{ headerShown: false }}
-      />
-      <Stack.Screen
-        name="Register"
-        component={RegisterScreen}
-        options={{ headerShown: false }}
-      />
-      <Stack.Screen
-        name="ForgotPassword"
-        component={ForgotPasswordScreen}
-        options={{ headerShown: false }}
-      />
-      <Stack.Screen
-        name="ResetPassword"
-        component={ResetPasswordScreen}
-        options={{ headerShown: false }}
-      />
-
-      {/* ===== APP ===== */}
       <Stack.Screen name="Home" component={HomeScreen} />
 
       <Stack.Screen
@@ -300,6 +287,7 @@ export default function StackNavigator({ initialRoute }: StackNavigatorProps) {
 /* ====================================================
    Estilos header
 ==================================================== */
+
 const headerStyles = StyleSheet.create({
   logoTitle: {
     flexDirection: "row",

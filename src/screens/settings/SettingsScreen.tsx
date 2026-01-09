@@ -1,81 +1,67 @@
 // src/screens/settings/SettingsScreen.tsx
-import React, { useState, useEffect } from "react";
+
+import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Switch } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 
-const SETTINGS_KEY = "@lifereminder/settings";
-
-type HourFormat = "12" | "24";
-
-type Settings = {
-  notificationsEnabled: boolean;
-  medLow20: boolean; // aviso 20%
-  medLow10: boolean; // aviso 10%
-  vibration: boolean;
-};
+import {
+  getSettings,
+  saveSettings,
+  disableAllNotifications,
+  enableNotifications,
+} from "../../services/settingsService";
 
 const SettingsScreen: React.FC = () => {
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [vibration, setVibration] = useState(true);
   const [medLow20, setMedLow20] = useState(true);
   const [medLow10, setMedLow10] = useState(true);
-  const [vibration, setVibration] = useState(true);
-  const [hourFormat, setHourFormat] = useState<HourFormat>("24");
 
-  // ================== CARGAR AJUSTES ==================
+  // ================== CARGA INICIAL ==================
   useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        const json = await AsyncStorage.getItem(SETTINGS_KEY);
-        if (!json) return;
+    let mounted = true;
 
-        const saved: Partial<Settings> = JSON.parse(json);
+    getSettings().then((s) => {
+      if (!mounted) return;
+      setNotificationsEnabled(s.notificationsEnabled);
+      setVibration(s.vibration);
+      setMedLow20(s.medLow20);
+      setMedLow10(s.medLow10);
+    });
 
-        if (typeof saved.notificationsEnabled === "boolean") {
-          setNotificationsEnabled(saved.notificationsEnabled);
-        }
-        if (typeof saved.medLow20 === "boolean") {
-          setMedLow20(saved.medLow20);
-        }
-        if (typeof saved.medLow10 === "boolean") {
-          setMedLow10(saved.medLow10);
-        }
-        if (typeof saved.vibration === "boolean") {
-          setVibration(saved.vibration);
-        }
-      } catch (e) {}
+    return () => {
+      mounted = false;
     };
-
-    loadSettings();
   }, []);
 
-  // ================== GUARDAR AJUSTES ==================
-  const persistSettings = async (partial: Partial<Settings>) => {
-    try {
-      const current: Settings = {
-        notificationsEnabled,
-        medLow20,
-        medLow10,
-        vibration,
-      };
+  // ================== HANDLERS ==================
 
-      const newSettings: Settings = { ...current, ...partial };
-      await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(newSettings));
+  const onToggleNotifications = async (value: boolean) => {
+    setNotificationsEnabled(value);
 
-      if (partial.notificationsEnabled !== undefined) {
-        setNotificationsEnabled(partial.notificationsEnabled);
-      }
-      if (partial.medLow20 !== undefined) {
-        setMedLow20(partial.medLow20);
-      }
-      if (partial.medLow10 !== undefined) {
-        setMedLow10(partial.medLow10);
-      }
-      if (partial.vibration !== undefined) {
-        setVibration(partial.vibration);
-      }
-    } catch (e) {}
+    if (value) {
+      await enableNotifications();
+    } else {
+      await disableAllNotifications();
+    }
   };
+
+  const onToggleVibration = async (value: boolean) => {
+    setVibration(value);
+    await saveSettings({ vibration: value });
+  };
+
+  const onToggleMedLow20 = async (value: boolean) => {
+    setMedLow20(value);
+    await saveSettings({ medLow20: value });
+  };
+
+  const onToggleMedLow10 = async (value: boolean) => {
+    setMedLow10(value);
+    await saveSettings({ medLow10: value });
+  };
+
+  // ================== UI ==================
 
   return (
     <SafeAreaView style={styles.container}>
@@ -93,9 +79,7 @@ const SettingsScreen: React.FC = () => {
             </View>
             <Switch
               value={notificationsEnabled}
-              onValueChange={(value) =>
-                persistSettings({ notificationsEnabled: value })
-              }
+              onValueChange={onToggleNotifications}
             />
           </View>
 
@@ -109,7 +93,8 @@ const SettingsScreen: React.FC = () => {
             </View>
             <Switch
               value={vibration}
-              onValueChange={(value) => persistSettings({ vibration: value })}
+              onValueChange={onToggleVibration}
+              disabled={!notificationsEnabled}
             />
           </View>
 
@@ -124,10 +109,7 @@ const SettingsScreen: React.FC = () => {
                 20%.
               </Text>
             </View>
-            <Switch
-              value={medLow20}
-              onValueChange={(value) => persistSettings({ medLow20: value })}
-            />
+            <Switch value={medLow20} onValueChange={onToggleMedLow20} />
           </View>
 
           {/* Aviso 10% */}
@@ -140,10 +122,7 @@ const SettingsScreen: React.FC = () => {
                 Alerta crítica antes de que se termine.
               </Text>
             </View>
-            <Switch
-              value={medLow10}
-              onValueChange={(value) => persistSettings({ medLow10: value })}
-            />
+            <Switch value={medLow10} onValueChange={onToggleMedLow10} />
           </View>
         </View>
 
@@ -162,6 +141,8 @@ const SettingsScreen: React.FC = () => {
     </SafeAreaView>
   );
 };
+
+// ================== STYLES (SIN CAMBIOS) ==================
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f5f6fa" },

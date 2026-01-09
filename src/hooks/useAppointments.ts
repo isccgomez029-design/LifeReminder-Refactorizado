@@ -13,8 +13,10 @@ import { listenAppointments } from "../services/appointmentsService";
 import { deleteAndroidEvent } from "../services/deviceCalendarService";
 import { archiveAppointment } from "../utils/archiveHelpers";
 
+import { hasPermission } from "../services/careNetworkService";
+
 // =======================
-// Helpers internos (sin archivo extra)
+// Helpers internos
 // =======================
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
 const toISO = (d: Date) =>
@@ -78,7 +80,7 @@ function formatTime12(time?: string | null) {
 
 function getMonthMatrix(year: number, monthIndex0: number) {
   const first = new Date(year, monthIndex0, 1);
-  const startWeekIdx = (first.getDay() + 6) % 7; // L=0 ... D=6
+  const startWeekIdx = (first.getDay() + 6) % 7;
   const daysInMonth = new Date(year, monthIndex0 + 1, 0).getDate();
   const prevDays = new Date(year, monthIndex0, 0).getDate();
 
@@ -118,15 +120,26 @@ function isSameDay(a: Date, b: Date) {
 }
 
 // =======================
-// Hook
+// Tipos
 // =======================
-type Params = {
-  navigation: any;
-  routeParams?: { patientUid?: string };
+type RouteParams = {
+  patientUid?: string;
+  patientName?: string;
+  accessMode?: "full" | "read-only" | "alerts-only" | "disabled";
 };
 
-// Hook central para listar, filtrar y manipular citas (incluye mini-calendario).
+type Params = {
+  navigation: any;
+  routeParams?: RouteParams;
+};
+
+// =======================
+// Hook
+// =======================
 export function useAppointments({ navigation, routeParams }: Params) {
+  const params = routeParams ?? {};
+  const accessMode = params.accessMode ?? "full";
+
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [selectedApptId, setSelectedApptId] = useState<string | null>(null);
 
@@ -143,12 +156,55 @@ export function useAppointments({ navigation, routeParams }: Params) {
   const [selectedDate, setSelectedDate] = useState<Date | null>(today);
 
   // dueño real
-  const loggedUserUid =
-    auth.currentUser?.uid || offlineAuthService.getCurrentUid();
-  const ownerUid = routeParams?.patientUid ?? loggedUserUid ?? null;
+  const loggedUserUid = offlineAuthService.getCurrentUid();
+  const ownerUid = params.patientUid ?? loggedUserUid ?? null;
+
   const isCaregiverView =
-    !!routeParams?.patientUid && routeParams.patientUid !== loggedUserUid;
+    !!params.patientUid && params.patientUid !== loggedUserUid;
+
   const canModify = ownerUid === loggedUserUid;
+  const canView = hasPermission(accessMode, "view");
+
+  //  BLOQUEO TOTAL (alerts-only / disabled)
+  if (!canView) {
+    return {
+      ownerUid,
+      canModify: false,
+      isCaregiverView: true,
+      blocked: true,
+
+      loading: false,
+      pendingChanges: 0,
+
+      upcomingAppointments: [],
+      selectedApptId: null,
+      selectedAppt: null,
+
+      showCal: false,
+      setShowCal: () => {},
+      cursor,
+      selectedDate: null,
+      setSelectedDate: () => {},
+      monthMatrix: [],
+      monthKeyMap: new Map(),
+      selectedItems: [],
+      monthLabel: "",
+      today,
+      isSameDay,
+
+      formatApptDateTime,
+      formatTime12,
+      toISO,
+
+      reloadFromCache: async () => {},
+      toggleSelect: () => {},
+      goAdd: () => {},
+      goEdit: () => {},
+      removeSelected: async () => {},
+      goPrevMonth: () => {},
+      goNextMonth: () => {},
+    };
+  }
 
   const reloadFromCache = useCallback(async () => {
     if (!ownerUid) return;
@@ -163,13 +219,9 @@ export function useAppointments({ navigation, routeParams }: Params) {
         ) as Appointment[];
         setAppointments(items);
       }
-    } catch {
-      // no-op
-    }
+    } catch {}
   }, [ownerUid]);
 
-  // Conectividad + cola
-  // Mantiene estado online/offline y dispara el procesamiento de la cola al volver internet.
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener((state) => {
       const online =
@@ -186,43 +238,59 @@ export function useAppointments({ navigation, routeParams }: Params) {
     syncQueueService.getPendingCount().then(setPendingChanges);
     return () => unsubscribe();
   }, []);
-
-  // Listener central (service ya hace cache-first + onSnapshot)
-  // Se suscribe a citas del owner y filtra archivadas; controla loading.
   useEffect(() => {
     if (!ownerUid) return;
+    let mounted = true;
 
-    setLoading(true);
+    const start = async () => {
+      setLoading(true);
 
-    const unsub = listenAppointments(
-      ownerUid,
-      (items) => {
-        const filtered = (items as any[]).filter(
-          (a) => !a?.isArchived
-        ) as Appointment[];
-        setAppointments(filtered);
+      // 1️ Cache inmediato (SIEMPRE)
+      await reloadFromCache();
+      if (!mounted) return;
+
+      // 2️ Si está offline → solo cache
+      if (!isOnline) {
         setLoading(false);
-      },
-      () => setLoading(false)
-    );
+        return;
+      }
+
+      // 3 Firestore realtime
+      const unsub = listenAppointments(
+        ownerUid,
+        async (items) => {
+          if (!mounted) return;
+
+          const filtered = (items as any[]).filter(
+            (a) => !a?.isArchived
+          ) as Appointment[];
+
+          setAppointments(filtered);
+
+          // 4️ FORZAR RELECTURA DE CACHE
+          setTimeout(() => reloadFromCache(), 50);
+
+          setLoading(false);
+        },
+        () => setLoading(false)
+      );
+
+      return unsub;
+    };
+
+    let unsubscribe: (() => void) | undefined;
+    start().then((u) => (unsubscribe = u));
 
     return () => {
-      unsub?.();
+      mounted = false;
+      unsubscribe?.();
     };
-  }, [ownerUid]);
+  }, [ownerUid, isOnline, reloadFromCache]);
 
   const upcomingAppointments = useMemo(() => {
     const now = new Date();
     return appointments.filter((a) => !isAppointmentPast(a, now));
   }, [appointments]);
-
-  useEffect(() => {
-    if (!selectedApptId) return;
-    const stillExists = upcomingAppointments.some(
-      (a) => a.id === selectedApptId
-    );
-    if (!stillExists) setSelectedApptId(null);
-  }, [upcomingAppointments, selectedApptId]);
 
   const selectedAppt = useMemo(
     () => upcomingAppointments.find((a) => a.id === selectedApptId) ?? null,
@@ -257,18 +325,24 @@ export function useAppointments({ navigation, routeParams }: Params) {
     setSelectedApptId((prev) => (prev === id ? null : id));
   };
 
-  // Navega para crear una nueva cita (con dueño correcto).
   const goAdd = () => {
+    if (!canModify) {
+      Alert.alert("Solo lectura", "No puedes crear citas.");
+      return;
+    }
     navigation.navigate("AddAppointment", {
       mode: "new",
       patientUid: ownerUid ?? undefined,
     } as any);
   };
 
-  // Navega para editar la cita seleccionada.
   const goEdit = () => {
+    if (!canModify) {
+      Alert.alert("Solo lectura", "No puedes editar citas.");
+      return;
+    }
     if (!selectedAppt) {
-      Alert.alert("Selecciona una cita", "Toca una cita para poder editarla.");
+      Alert.alert("Selecciona una cita", "Toca una cita para editarla.");
       return;
     }
     navigation.navigate("AddAppointment", {
@@ -278,8 +352,11 @@ export function useAppointments({ navigation, routeParams }: Params) {
     } as any);
   };
 
-  // Confirmación + eliminación optimista + archivado (usa cola offline si aplica).
   const removeSelected = async () => {
+    if (!canModify) {
+      Alert.alert("Solo lectura", "No puedes eliminar citas.");
+      return;
+    }
     if (!selectedAppt || !ownerUid) {
       Alert.alert("Selecciona una cita", "Toca una cita para eliminarla.");
       return;
@@ -294,7 +371,6 @@ export function useAppointments({ navigation, routeParams }: Params) {
           text: "Eliminar",
           style: "destructive",
           onPress: async () => {
-            // optimistic
             setAppointments((prev) =>
               prev.filter((a) => a.id !== selectedAppt.id)
             );
@@ -303,9 +379,7 @@ export function useAppointments({ navigation, routeParams }: Params) {
             if (Platform.OS === "android" && selectedAppt.eventId) {
               try {
                 await deleteAndroidEvent(selectedAppt.eventId);
-              } catch {
-                // no-op
-              }
+              } catch {}
             }
 
             try {
@@ -315,15 +389,7 @@ export function useAppointments({ navigation, routeParams }: Params) {
                 selectedAppt as any
               );
               setPendingChanges(await syncQueueService.getPendingCount());
-
-              Alert.alert(
-                "¡Listo!",
-                isOnline
-                  ? "Cita eliminada."
-                  : "Se sincronizará cuando haya conexión."
-              );
             } catch {
-              Alert.alert("Error", "No se pudo eliminar la cita.");
               setAppointments((prev) => [...prev, selectedAppt]);
             }
           },
@@ -336,6 +402,7 @@ export function useAppointments({ navigation, routeParams }: Params) {
     ownerUid,
     canModify,
     isCaregiverView,
+    blocked: false,
 
     loading,
     pendingChanges,

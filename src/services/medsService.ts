@@ -17,6 +17,7 @@ import { offlineAlarmService } from "./offline/OfflineAlarmService";
 import { sendImmediateNotification } from "./Notifications";
 import { archiveMedication as archiveMedicationHelper } from "../utils/archiveHelpers";
 import { normalizeTime } from "../utils/timeUtils";
+import { shouldNotifyMedLow20, shouldNotifyMedLow10 } from "./settingsService";
 
 // ============================================================
 //                    TIPOS DE MEDICAMENTO
@@ -146,6 +147,11 @@ export async function createMedication(
   userId: string,
   data: Partial<Medication>
 ): Promise<string> {
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== userId) {
+    return "";
+  }
+
   const tempId = `temp_${Date.now()}_${Math.random()
     .toString(36)
     .substr(2, 9)}`;
@@ -158,7 +164,6 @@ export async function createMedication(
     _createdLocally: true,
   };
 
-  //  enqueue() ya agrega al cache por dentro
   await syncQueueService.enqueue(
     "CREATE",
     "medications",
@@ -175,6 +180,9 @@ export async function updateMedication(
   medId: string,
   data: Partial<Medication>
 ): Promise<void> {
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== userId) return;
+
   const updateData = { ...data, updatedAt: new Date().toISOString() };
 
   await syncQueueService.enqueue(
@@ -190,7 +198,9 @@ export async function deleteMedication(
   userId: string,
   medId: string
 ): Promise<void> {
-  //  enqueue DELETE ya hace removeItemFromCache()
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== userId) return;
+
   await syncQueueService.enqueue("DELETE", "medications", medId, userId, {});
 }
 
@@ -212,10 +222,14 @@ export async function archiveMedication(
 export async function getActiveMedsFromCache(
   userId: string
 ): Promise<Medication[]> {
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== userId) return [];
+
   const activeItems = await syncQueueService.getActiveItems(
     "medications",
     userId
   );
+
   if (!activeItems) return [];
   return activeItems.map((x: any) => normalizeMedication(x));
 }
@@ -229,15 +243,14 @@ export function subscribeMedicationsFirestore(
   onError?: (error: any) => void
 ): Unsubscribe {
   const medsRef = collection(db, "users", userId, "medications");
-  const q = query(
-    medsRef,
-    where("isArchived", "==", false),
-    orderBy("createdAt", "desc")
-  );
+  const q = query(medsRef, where("isArchived", "==", false));
 
   return onSnapshot(
     q,
     async (snapshot) => {
+      const validUid = syncQueueService.getCurrentValidUserId();
+      if (!validUid || validUid !== userId) return;
+
       const items = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
       await syncQueueService.saveToCache("medications", userId, items);
 
@@ -297,12 +310,15 @@ export async function markMedicationTaken(
 ): Promise<MarkTakenResult> {
   const { ownerUid, med, patientName } = input;
 
-  // 1) Cancelar alarma actual si existe
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== ownerUid) {
+    throw new Error("INVALID_SESSION");
+  }
+
   if (med.currentAlarmId) {
     await offlineAlarmService.cancelAlarm(med.currentAlarmId);
   }
 
-  // 2) Calcular nueva cantidad
   const nowDate = new Date();
   const intervalMs = freqToMs(med.frecuencia);
 
@@ -311,13 +327,17 @@ export async function markMedicationTaken(
   const porToma = med.cantidadPorToma ?? 1;
   const nuevaCantidad = Math.max(0, actual - porToma);
 
-  // 3) Notificaciones low stock
   let low20 = med.low20Notified ?? false;
   let low10 = med.low10Notified ?? false;
 
   const porcentaje = initial > 0 ? nuevaCantidad / initial : 0;
 
-  if (!low20 && porcentaje <= 0.2 && porcentaje > 0.1) {
+  if (
+    !low20 &&
+    porcentaje <= 0.2 &&
+    porcentaje > 0.1 &&
+    (await shouldNotifyMedLow20())
+  ) {
     await sendImmediateNotification(
       `Queda poco de ${med.nombre}`,
       "Te queda aproximadamente el 20%."
@@ -325,7 +345,7 @@ export async function markMedicationTaken(
     low20 = true;
   }
 
-  if (!low10 && porcentaje <= 0.1) {
+  if (!low10 && porcentaje <= 0.1 && (await shouldNotifyMedLow10())) {
     await sendImmediateNotification(
       `⚠️ ${med.nombre} casi se termina`,
       "Solo te queda el 10% del medicamento."
@@ -333,7 +353,6 @@ export async function markMedicationTaken(
     low10 = true;
   }
 
-  // 4) Programar siguiente toma + alarma
   let nextDueAt: Date | null = null;
   let proximaTomaText = med.proximaToma ?? "";
   let newAlarmId: string | null = null;
@@ -364,16 +383,12 @@ export async function markMedicationTaken(
     if (result.success) newAlarmId = result.notificationId;
   }
 
-  // 5) Update payload
   const updateData: any = {
     lastTakenAt: nowDate.toISOString(),
     cantidadActual: nuevaCantidad,
-    cantidad: nuevaCantidad,
     low20Notified: low20,
     low10Notified: low10,
     updatedAt: nowDate.toISOString(),
-
-    // al tomar, se limpian estados de posposición
     snoozeCount: 0,
     snoozedUntil: null,
     lastSnoozeAt: null,
@@ -385,30 +400,26 @@ export async function markMedicationTaken(
     updateData.proximaToma = proximaTomaText;
   }
 
-  // NO duplicar cache: enqueue UPDATE ya actualiza el cache por dentro
   await syncQueueService.enqueue(
     "UPDATE",
     "medications",
-    med.id,
+    med.id!,
     ownerUid,
     updateData
   );
 
-  const updatedMed: Medication & { id: string } = {
-    ...med,
-    proximaToma: proximaTomaText,
-    nextDueAt,
-    cantidadActual: nuevaCantidad,
-    low20Notified: low20,
-    low10Notified: low10,
-    currentAlarmId: newAlarmId,
-    snoozeCount: 0,
-    snoozedUntil: null,
-    lastSnoozeAt: null,
-    lastTakenAt: nowDate,
+  return {
+    updatedMed: {
+      ...med,
+      cantidadActual: nuevaCantidad,
+      nextDueAt,
+      proximaToma: proximaTomaText,
+      currentAlarmId: newAlarmId,
+      low20Notified: low20,
+      low10Notified: low10,
+      lastTakenAt: nowDate,
+    },
   };
-
-  return { updatedMed };
 }
 
 type ReprogramInput = {

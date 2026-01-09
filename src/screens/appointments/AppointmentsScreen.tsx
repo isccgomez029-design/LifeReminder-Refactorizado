@@ -39,7 +39,7 @@ export default function AppointmentsScreen({
     upcomingAppointments,
     selectedApptId,
     selectedAppt,
-
+    blocked,
     showCal,
     setShowCal,
     cursor,
@@ -63,7 +63,30 @@ export default function AppointmentsScreen({
     goPrevMonth,
     goNextMonth,
   } = useAppointments({ navigation, routeParams: route.params as any });
+  /* ============================================================
+   *  BLOQUEO TOTAL (alerts-only / disabled)
+   * ============================================================ */
+  if (blocked) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <OfflineBanner pendingChanges={pendingChanges} />
 
+        <View style={styles.center}>
+          <MaterialIcons
+            name="notifications-active"
+            size={48}
+            color={COLORS.textSecondary}
+          />
+
+          <Text style={styles.emptyTitle}>Acceso limitado</Text>
+
+          <Text style={styles.emptyText}>
+            Este contacto solo recibe alertas del paciente.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
   return (
     <SafeAreaView style={styles.safe}>
       <OfflineBanner pendingChanges={pendingChanges} />
@@ -74,132 +97,137 @@ export default function AppointmentsScreen({
         translucent={false}
       />
 
-      <ScrollView
-        style={styles.container}
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.headerRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.title}>Citas médicas</Text>
-            <Text style={styles.subtitle}>Próximas citas y opciones</Text>
-          </View>
-
-          <TouchableOpacity
-            style={styles.sectionIcon}
-            onPress={() => setShowCal(true)}
-            accessibilityLabel="Abrir mini calendario"
-          >
-            <MaterialIcons name="event" size={26} color={COLORS.surface} />
-          </TouchableOpacity>
-        </View>
-
-        {isCaregiverView && (
-          <View style={styles.caregiverBanner}>
-            <Text style={styles.caregiverText}>
-              Estás viendo las citas de un paciente.
-            </Text>
-          </View>
-        )}
-
-        <View style={styles.panel}>
-          {loading ? (
-            <Text style={{ color: COLORS.textSecondary, marginBottom: 12 }}>
-              Cargando citas...
-            </Text>
-          ) : upcomingAppointments.length === 0 ? (
-            <Text style={{ color: COLORS.textSecondary, marginBottom: 12 }}>
-              No hay próximas citas registradas.
-            </Text>
-          ) : null}
-
-          {upcomingAppointments.map((a) => {
-            const selected = a.id === selectedApptId;
-            return (
-              <TouchableOpacity
-                key={a.id}
-                style={[
-                  styles.appointmentCard,
-                  selected && styles.appointmentCardSelected,
-                ]}
-                onPress={() => toggleSelect(a.id)}
-                activeOpacity={0.8}
-              >
-                <View style={styles.cardHeaderRow}>
-                  <Text style={styles.appointmentTitle}>
-                    {a.doctor ?? a.title}
-                  </Text>
-
-                  {selected ? (
-                    <View style={styles.selectedPill}>
-                      <MaterialIcons
-                        name="check-circle"
-                        size={16}
-                        color="#fff"
-                      />
-                      <Text style={styles.selectedPillText}>Seleccionada</Text>
-                    </View>
-                  ) : (
-                    <MaterialIcons
-                      name="radio-button-unchecked"
-                      size={18}
-                      color={COLORS.border}
-                    />
-                  )}
-                </View>
-
-                <View style={styles.chip}>
-                  <Text style={styles.chipText}>
-                    {formatApptDateTime(a.date, a.time)}
-                  </Text>
-                </View>
-
-                {a.doctor && a.title ? (
-                  <Text style={styles.locationText}>{a.title}</Text>
-                ) : null}
-                {a.location ? (
-                  <Text style={styles.locationText}>{a.location}</Text>
-                ) : null}
-              </TouchableOpacity>
-            );
-          })}
-
-          {canModify && (
-            <View style={styles.actionsRow}>
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.primaryBtn]}
-                onPress={goAdd}
-              >
-                <Text style={styles.actionText}>Agregar cita</Text>
-              </TouchableOpacity>
+      <View style={styles.wrapper}>
+        <ScrollView
+          style={styles.container}
+          showsVerticalScrollIndicator={false}
+          bounces={true}
+        >
+          <View style={styles.content}>
+            <View style={styles.headerRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.title}>Citas médicas</Text>
+              </View>
 
               <TouchableOpacity
-                style={[
-                  styles.actionBtn,
-                  styles.primaryBtn,
-                  !selectedAppt && { opacity: 0.5 },
-                ]}
-                disabled={!selectedAppt}
-                onPress={goEdit}
+                style={styles.sectionIcon}
+                onPress={() => setShowCal(true)}
+                accessibilityLabel="Abrir mini calendario"
               >
-                <Text style={styles.actionText}>Editar cita</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.actionBtn,
-                  styles.dangerBtn,
-                  !selectedAppt && { opacity: 0.5 },
-                ]}
-                disabled={!selectedAppt}
-                onPress={removeSelected}
-              >
-                <Text style={styles.actionText}>Eliminar cita</Text>
+                <MaterialIcons name="event" size={26} color={COLORS.surface} />
               </TouchableOpacity>
             </View>
-          )}
-        </View>
-      </ScrollView>
+
+            {isCaregiverView && (
+              <View style={styles.caregiverBanner}>
+                <Text style={styles.caregiverText}>
+                  Estás viendo las citas de un paciente.
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.panel}>
+              {loading ? (
+                <Text style={{ color: COLORS.textSecondary, marginBottom: 12 }}>
+                  Cargando citas...
+                </Text>
+              ) : upcomingAppointments.length === 0 ? (
+                <Text style={{ color: COLORS.textSecondary, marginBottom: 12 }}>
+                  No hay próximas citas registradas.
+                </Text>
+              ) : null}
+
+              {upcomingAppointments.map((a) => {
+                const selected = a.id === selectedApptId;
+                return (
+                  <TouchableOpacity
+                    key={a.id}
+                    style={[
+                      styles.appointmentCard,
+                      selected && styles.appointmentCardSelected,
+                    ]}
+                    onPress={() => toggleSelect(a.id)}
+                    activeOpacity={0.8}
+                  >
+                    <View style={styles.cardHeaderRow}>
+                      <Text style={styles.appointmentTitle}>
+                        {a.doctor ?? a.title}
+                      </Text>
+
+                      {selected ? (
+                        <View style={styles.selectedPill}>
+                          <MaterialIcons
+                            name="check-circle"
+                            size={16}
+                            color="#fff"
+                          />
+                          <Text style={styles.selectedPillText}>
+                            Seleccionada
+                          </Text>
+                        </View>
+                      ) : (
+                        <MaterialIcons
+                          name="radio-button-unchecked"
+                          size={18}
+                          color={COLORS.border}
+                        />
+                      )}
+                    </View>
+
+                    <View style={styles.chip}>
+                      <Text style={styles.chipText}>
+                        {formatApptDateTime(a.date, a.time)}
+                      </Text>
+                    </View>
+
+                    {a.doctor && a.title ? (
+                      <Text style={styles.locationText}>{a.title}</Text>
+                    ) : null}
+                    {a.location ? (
+                      <Text style={styles.locationText}>{a.location}</Text>
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              })}
+
+              {canModify && (
+                <View style={styles.actionsRow}>
+                  <TouchableOpacity
+                    style={[styles.actionBtn, styles.primaryBtn]}
+                    onPress={goAdd}
+                  >
+                    <Text style={styles.actionText}>Agregar</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.actionBtn,
+                      styles.primaryBtn,
+                      !selectedAppt && { opacity: 0.5 },
+                    ]}
+                    disabled={!selectedAppt}
+                    onPress={goEdit}
+                  >
+                    <Text style={styles.actionText}>Editar</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.actionBtn,
+                      styles.dangerBtn,
+                      !selectedAppt && { opacity: 0.5 },
+                    ]}
+                    disabled={!selectedAppt}
+                    onPress={removeSelected}
+                  >
+                    <Text style={styles.actionText}>Eliminar </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          </View>
+        </ScrollView>
+      </View>
 
       {/* Mini Calendario (Modal) */}
       <Modal
@@ -311,6 +339,7 @@ export default function AppointmentsScreen({
 /* ===================== ESTILOS ===================== */
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
+  wrapper: { flex: 1 },
   container: { flex: 1 },
   content: { padding: 8, paddingBottom: 24 },
 
@@ -518,4 +547,17 @@ const styles = StyleSheet.create({
   },
   dayItemChipText: { color: COLORS.surface, fontWeight: "700" },
   dayItemText: { color: COLORS.text, flex: 1, fontWeight: "600" },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
+  emptyTitle: {
+    fontSize: FONT_SIZES.large,
+    fontWeight: "700",
+    color: COLORS.text,
+    marginTop: 12,
+    marginBottom: 4,
+  },
 });

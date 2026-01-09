@@ -17,6 +17,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "../config/firebaseConfig";
+import { hasPermission } from "./careNetworkService";
 
 /* ============================================================
  *                    TIPOS Y CONSTANTES
@@ -39,12 +40,12 @@ export type CareNotification = {
   patientUid: string;
   patientName: string;
 
-  // meds/habits 
+  // meds/habits
   itemType?: "med" | "habit";
   itemName?: string;
   snoozeCount?: number;
 
-  // citas 
+  // citas
   appointmentTitle?: string;
   appointmentDateISO?: string;
   location?: string;
@@ -83,7 +84,6 @@ export async function configureNotificationPermissions(): Promise<void> {
   if (status !== "granted") {
     const req = await Notifications.requestPermissionsAsync();
     if (req.status !== "granted") {
-
       return;
     }
   }
@@ -94,8 +94,6 @@ export async function configureNotificationPermissions(): Promise<void> {
       importance: Notifications.AndroidImportance.HIGH,
     });
   }
-
-
 }
 
 /**
@@ -112,12 +110,9 @@ export async function sendImmediateNotification(
         body,
         sound: "default",
       },
-      trigger: null, 
+      trigger: null,
     });
-
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 /**
@@ -125,7 +120,7 @@ export async function sendImmediateNotification(
 
  */
 export async function scheduleAppointmentReminder(
-  patientUid: string, 
+  patientUid: string,
   dateISO: string, // "2025-11-25"
   time: string | undefined, // "14:30" o undefined
   title: string, // texto de la cita (doctor o motivo)
@@ -146,7 +141,6 @@ export async function scheduleAppointmentReminder(
 
     // Si ya pasó el momento del recordatorio, no programamos nada
     if (reminderDate <= new Date()) {
-
       return;
     }
 
@@ -160,7 +154,7 @@ export async function scheduleAppointmentReminder(
       trigger: reminderDate as any,
     });
 
-    // Aviso en FIRESTORE para cuidadores 
+    // Aviso en FIRESTORE para cuidadores
     try {
       await notifyCaregiversAboutAppointmentReminder({
         patientUid,
@@ -169,15 +163,12 @@ export async function scheduleAppointmentReminder(
         appointmentDateISO: appointmentDate.toISOString(),
         location,
       });
-    } catch (e) {   
-    }
-  } catch (err) {
-
-  }
+    } catch (e) {}
+  } catch (err) {}
 }
 
 /* ============================================================
- *       NOTIFICACIONES FIRESTORE 
+ *       NOTIFICACIONES FIRESTORE
  * ============================================================ */
 
 /**
@@ -208,7 +199,6 @@ export function listenCaregiverNotifications(
           patientUid: data.patientUid || "",
           patientName: data.patientName || "Paciente",
 
-
           itemType: data.itemType,
           itemName: data.itemName,
           snoozeCount: data.snoozeCount,
@@ -226,7 +216,6 @@ export function listenCaregiverNotifications(
       onData(list);
     },
     (error) => {
-
       onError?.(error);
     }
   );
@@ -243,7 +232,6 @@ export async function markNotificationAsRead(
     const notifRef = doc(db, "users", userId, "notifications", notificationId);
     await updateDoc(notifRef, { read: true });
   } catch (error) {
-
     throw error;
   }
 }
@@ -260,15 +248,13 @@ export async function markMultipleAsRead(
       markNotificationAsRead(userId, id)
     );
     await Promise.all(promises);
-
   } catch (error) {
-
     throw error;
   }
 }
 
 /* ============================================================
- *      NOTIFICACIONES FIRESTORE 
+ *      NOTIFICACIONES FIRESTORE
  * ============================================================ */
 
 /**
@@ -301,7 +287,6 @@ export async function notifyCaregiversAboutAppointmentReminder(params: {
     const snapshot = await getDocs(q);
 
     if (snapshot.empty) {
-
       return { success: true, notifiedCount: 0 };
     }
 
@@ -330,13 +315,12 @@ export async function notifyCaregiversAboutAppointmentReminder(params: {
 
       // Solo notificar si el modo de acceso permite alertas
       const accessMode = caregiverData.accessMode || "alerts-only";
-      if (accessMode === "disabled") {
 
+      if (!hasPermission(accessMode, "alerts")) {
         return false;
       }
 
       if (!caregiverUid) {
-
         return false;
       }
 
@@ -369,7 +353,6 @@ export async function notifyCaregiversAboutAppointmentReminder(params: {
 
     return { success: true, notifiedCount };
   } catch (error: any) {
-
     return { success: false, notifiedCount: 0, error: error?.message };
   }
 }
@@ -399,7 +382,6 @@ export async function notifyCaregiversAboutNoncompliance(params: {
     const snapshot = await getDocs(q);
 
     if (snapshot.empty) {
-
       return { success: true, notifiedCount: 0 };
     }
 
@@ -411,12 +393,10 @@ export async function notifyCaregiversAboutNoncompliance(params: {
       // Solo notificar si el modo de acceso permite alertas
       const accessMode = caregiverData.accessMode || "alerts-only";
       if (accessMode === "disabled") {
-
         return false;
       }
 
       if (!caregiverUid) {
-
         return false;
       }
 
@@ -452,7 +432,6 @@ export async function notifyCaregiversAboutNoncompliance(params: {
 
     return { success: true, notifiedCount };
   } catch (error: any) {
-
     return { success: false, notifiedCount: 0, error: error?.message };
   }
 }
@@ -487,7 +466,6 @@ export async function notifyCaregiversAboutDismissal(params: {
     const snapshot = await getDocs(q);
 
     if (snapshot.empty) {
-
       return { success: true, notifiedCount: 0 };
     }
 
@@ -499,12 +477,10 @@ export async function notifyCaregiversAboutDismissal(params: {
       // Solo notificar si el modo de acceso permite alertas
       const accessMode = caregiverData.accessMode || "alerts-only";
       if (accessMode === "disabled") {
-
         return false;
       }
 
       if (!caregiverUid) {
-
         return false;
       }
 
@@ -558,7 +534,6 @@ export async function notifyCaregiversAboutDismissal(params: {
 
     return { success: true, notifiedCount };
   } catch (error: any) {
-
     return { success: false, notifiedCount: 0, error: error?.message };
   }
 }
@@ -595,10 +570,7 @@ export async function logSnoozeEvent(params: {
       snoozeCount,
       timestamp: serverTimestamp(),
     });
-
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 /**
@@ -625,11 +597,7 @@ export async function logDismissalEvent(params: {
       snoozeCountBeforeDismiss,
       timestamp: serverTimestamp(),
     });
-
-
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 /**
@@ -655,11 +623,7 @@ export async function logComplianceSuccess(params: {
       afterSnoozes: afterSnoozes || 0,
       timestamp: serverTimestamp(),
     });
-
-
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 /* ===========================================================

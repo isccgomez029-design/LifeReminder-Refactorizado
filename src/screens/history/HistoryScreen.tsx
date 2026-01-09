@@ -1,6 +1,5 @@
 // src/screens/history/HistoryScreen.tsx
 
-
 import React from "react";
 import {
   View,
@@ -19,7 +18,6 @@ import { useRoute, RouteProp } from "@react-navigation/native";
 
 import { formatHHMMDisplay } from "../../utils/timeUtils";
 
-
 import { useHistory, HistoryItem } from "../../hooks/useHistory";
 
 type Nav = StackNavigationProp<RootStackParamList, "History">;
@@ -32,6 +30,7 @@ export default function HistoryScreen({ navigation }: { navigation: Nav }) {
     isLoading,
     ownerUid,
     isCaregiverView,
+    blocked,
 
     filterType,
     filterDay,
@@ -41,7 +40,28 @@ export default function HistoryScreen({ navigation }: { navigation: Nav }) {
     filteredItems,
     DAY_LABELS,
   } = useHistory({ route });
+  /* ============================================================
+   *  BLOQUEO TOTAL (alerts-only / disabled)
+   * ============================================================ */
+  if (blocked) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.center}>
+          <MaterialIcons
+            name="notifications-active"
+            size={48}
+            color={COLORS.textSecondary}
+          />
 
+          <Text style={styles.emptyTitle}>Acceso limitado</Text>
+
+          <Text style={styles.emptyText}>
+            Este contacto solo recibe alertas del paciente.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
   const renderItemCard = (item: HistoryItem) => {
     if (item.kind === "habit" && item.habit) {
       const h = item.habit;
@@ -224,9 +244,6 @@ export default function HistoryScreen({ navigation }: { navigation: Nav }) {
         <ScrollView contentContainerStyle={styles.content}>
           <Text style={styles.title}>
             {isCaregiverView ? "Historial del paciente" : "Mi historial"}
-          </Text>
-          <Text style={styles.subtitle}>
-            Hábitos, medicamentos y citas archivadas
           </Text>
 
           {isCaregiverView && (
@@ -579,5 +596,10 @@ const styles = StyleSheet.create({
     color: "#FFF",
     fontWeight: "700",
     fontSize: FONT_SIZES.medium,
+  },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
   },
 });

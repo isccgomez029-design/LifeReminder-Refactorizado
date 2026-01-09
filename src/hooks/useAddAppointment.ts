@@ -82,7 +82,7 @@ export function useAddAppointment({ navigation, routeParams }: Params) {
     }
 
     // Obtiene el UID del usuario (online u offline)
-    const userId = auth.currentUser?.uid || offlineAuthService.getCurrentUid();
+    const userId = offlineAuthService.getCurrentUid();
     if (!userId) {
       Alert.alert(
         "Sesión requerida",

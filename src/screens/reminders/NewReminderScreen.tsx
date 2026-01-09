@@ -1,6 +1,5 @@
 // src/screens/reminders/NewReminderScreen.tsx
 
-
 import React from "react";
 import {
   View,
@@ -14,20 +13,18 @@ import { MaterialIcons, FontAwesome5 } from "@expo/vector-icons";
 import { COLORS, FONT_SIZES } from "../../../types";
 import { StackNavigationProp } from "@react-navigation/stack";
 import { RootStackParamList } from "../../navigation/StackNavigator";
-import { useRoute, RouteProp } from "@react-navigation/native";
+import { useRoute } from "@react-navigation/native";
 
 import { OfflineBanner } from "../../components/OfflineBanner";
 import { formatHHMMDisplay } from "../../utils/timeUtils";
-
 import { useHabits } from "../../hooks/useHabits";
 
 type Nav = StackNavigationProp<RootStackParamList, "NewReminder">;
-type Route = RouteProp<RootStackParamList, "NewReminder">;
 
 const DAY_LABELS = ["L", "M", "X", "J", "V", "S", "D"];
 
 export default function NewReminderScreen({ navigation }: { navigation: Nav }) {
-  const route = useRoute<Route>();
+  const route = useRoute<any>();
 
   const {
     habits,
@@ -36,13 +33,45 @@ export default function NewReminderScreen({ navigation }: { navigation: Nav }) {
     loading,
     pendingChanges,
     isCaregiverView,
+    blocked,
 
     toggleSelect,
     onAdd,
     onEdit,
     onArchive,
-  } = useHabits({ navigation, route });
+  } = useHabits({
+    navigation,
+    routeParams: route.params,
+  });
 
+  /* ============================================================
+   *  BLOQUEO TOTAL (alerts-only / disabled)
+   * ============================================================ */
+  if (blocked) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <OfflineBanner pendingChanges={pendingChanges} />
+
+        <View style={styles.center}>
+          <MaterialIcons
+            name="notifications-active"
+            size={48}
+            color={COLORS.textSecondary}
+          />
+
+          <Text style={styles.emptyTitle}>Acceso limitado</Text>
+
+          <Text style={styles.emptyText}>
+            Este contacto solo recibe alertas del paciente.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  /* ============================================================
+   * Render helpers
+   * ============================================================ */
   const renderPriorityChip = (p?: string) => {
     const label = p === "alta" ? "Alta" : p === "baja" ? "Baja" : "Normal";
     const bg =
@@ -94,6 +123,9 @@ export default function NewReminderScreen({ navigation }: { navigation: Nav }) {
     );
   };
 
+  /* ============================================================
+   * UI
+   * ============================================================ */
   return (
     <SafeAreaView style={styles.safe}>
       <OfflineBanner pendingChanges={pendingChanges} />
@@ -103,6 +135,7 @@ export default function NewReminderScreen({ navigation }: { navigation: Nav }) {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
+        {/* Header */}
         <View style={styles.headerRow}>
           <View style={{ flex: 1 }}>
             <Text style={styles.title}>Hábitos y recordatorios</Text>
@@ -115,7 +148,7 @@ export default function NewReminderScreen({ navigation }: { navigation: Nav }) {
           </View>
         </View>
 
-        {/* Banner si estás viendo a un paciente como cuidador */}
+        {/* Banner cuidador */}
         {isCaregiverView && (
           <View style={styles.caregiverBanner}>
             <Text style={styles.caregiverText}>
@@ -225,27 +258,13 @@ export default function NewReminderScreen({ navigation }: { navigation: Nav }) {
   );
 }
 
+/* ============================================================
+ * Styles
+ * ============================================================ */
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
   container: { flex: 1 },
   content: { padding: 8, paddingBottom: 24 },
-
-  cacheBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    backgroundColor: "#FFF3CD",
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-    marginBottom: 10,
-  },
-  cacheText: {
-    fontSize: FONT_SIZES.small,
-    color: "#856404",
-    fontWeight: "600",
-  },
 
   headerRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
   title: { fontSize: FONT_SIZES.xlarge, fontWeight: "800", color: COLORS.text },
@@ -283,6 +302,17 @@ const styles = StyleSheet.create({
     padding: 12,
   },
 
+  blockedTitle: {
+    fontSize: FONT_SIZES.large,
+    fontWeight: "800",
+    color: COLORS.text,
+    marginBottom: 6,
+  },
+  blockedText: {
+    fontSize: FONT_SIZES.medium,
+    color: COLORS.textSecondary,
+  },
+
   habitCard: {
     backgroundColor: COLORS.surface,
     borderRadius: 10,
@@ -293,11 +323,8 @@ const styles = StyleSheet.create({
   },
   habitCardSelected: {
     borderColor: COLORS.primary,
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
   },
+
   cardHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -348,43 +375,24 @@ const styles = StyleSheet.create({
   },
   selectedPillText: { color: "#fff", fontWeight: "700", fontSize: 12 },
 
-  // Días
-  daysRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginTop: 6,
-  },
+  daysRow: { flexDirection: "row", gap: 6, marginTop: 6 },
   dayPill: {
     minWidth: 28,
     height: 28,
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 4,
   },
-  dayPillInactive: {
-    backgroundColor: "#E0E0E0",
-  },
-  dayPillActive: {
-    backgroundColor: COLORS.primary,
-  },
+  dayPillInactive: { backgroundColor: "#E0E0E0" },
+  dayPillActive: { backgroundColor: COLORS.primary },
   dayPillText: {
     fontSize: FONT_SIZES.small,
     fontWeight: "700",
     color: COLORS.textSecondary,
   },
-  dayPillTextActive: {
-    color: COLORS.surface,
-  },
+  dayPillTextActive: { color: COLORS.surface },
 
-  // Horas
-  timesRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 6,
-    marginTop: 6,
-  },
+  timesRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 6 },
   timeChip: {
     backgroundColor: COLORS.secondary,
     borderRadius: 999,
@@ -397,20 +405,15 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
-  // Botones
   actionsRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
     marginTop: 14,
-    width: "100%",
   },
   actionBtn: {
     flex: 1,
     borderRadius: 10,
     paddingVertical: 12,
     alignItems: "center",
-    justifyContent: "center",
     marginHorizontal: 4,
   },
   primaryBtn: { backgroundColor: COLORS.primary },
@@ -420,7 +423,25 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     fontSize: FONT_SIZES.medium,
   },
-  actionDisabled: {
-    opacity: 0.4,
+  actionDisabled: { opacity: 0.4 },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
+  emptyTitle: {
+    fontSize: FONT_SIZES.large,
+    fontWeight: "700",
+    color: COLORS.text,
+    marginTop: 12,
+    marginBottom: 4,
+  },
+
+  emptyText: {
+    fontSize: FONT_SIZES.small,
+    color: COLORS.textSecondary,
+    textAlign: "center",
+    marginTop: 8,
   },
 });

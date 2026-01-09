@@ -60,7 +60,6 @@ export interface SyncResult {
   error?: string;
 }
 
-
 //                    ESTADO INTERNO
 let isOnline = true;
 let isProcessing = false;
@@ -76,9 +75,50 @@ const AUTO_SYNC_COLLECTIONS = [
   "history",
 ];
 
+// ============================================================
+//                    VALIDACIÓN DE USUARIO
+// ============================================================
+
+let _currentValidUserId: string | null = null;
+
+/**
+ * Establece el UID del usuario actual válido
+ * Debe llamarse desde OfflineAuthService cuando cambia el usuario
+ */
+function setCurrentValidUserId(userId: string | null): void {
+  const prev = _currentValidUserId;
+  _currentValidUserId = userId;
+}
+
+/**
+ * Obtiene el UID del usuario actual válido
+ */
+function getCurrentValidUserId(): string | null {
+  return _currentValidUserId;
+}
+
+// ============================================================
+//           HELPER DE VALIDACIÓN
+// ============================================================
+
+/**
+ * Valida que el userId sea el usuario actual válido
+ * Retorna true si es válido, false si no
+ */
+function validateUserId(userId: string, methodName: string): boolean {
+  // Si no hay UID válido establecido, permitir (inicialización)
+  if (!_currentValidUserId) {
+    return true;
+  }
+
+  //  Validar que coincida
+  if (userId !== _currentValidUserId) {
+    return false;
+  }
+  return true;
+}
 
 //  UTILIDADES
-
 
 function getCacheKey(collectionName: string, userId: string): string {
   return `${STORAGE_PREFIX}/${userId}/${collectionName}`;
@@ -96,7 +136,6 @@ function normalizeForStorage(value: any): any {
       return null;
     }
   }
-
 
   if (typeof value?.seconds === "number") {
     const d = new Date(value.seconds * 1000);
@@ -125,12 +164,10 @@ function normalizeForStorage(value: any): any {
   return value;
 }
 
-
 //                    INICIALIZACIÓN
 
 async function initialize(): Promise<void> {
   if (isInitialized) {
-
     return;
   }
 
@@ -143,10 +180,7 @@ async function initialize(): Promise<void> {
     isOnline =
       state.isConnected === true && state.isInternetReachable !== false;
 
-
-
     if (isOnline && wasOffline) {
-
       setTimeout(() => processQueue(), 1500);
     }
   });
@@ -154,22 +188,18 @@ async function initialize(): Promise<void> {
   const state = await NetInfo.fetch();
   isOnline = state.isConnected === true && state.isInternetReachable !== false;
 
-
-
   const queue = await getQueue();
   const pendingCount = queue.filter(
     (item) => item.status === "PENDING" || item.status === "FAILED"
   ).length;
 
   if (pendingCount > 0) {
-
     if (isOnline) {
       setTimeout(() => processQueue(), 2000);
     }
   }
 
   isInitialized = true;
-
 }
 
 function destroy(): void {
@@ -179,9 +209,7 @@ function destroy(): void {
   }
   listeners = [];
   isInitialized = false;
-
 }
-
 
 //                    QUEUE LISTENERS
 function addListener(callback: (queue: QueueItem[]) => void): () => void {
@@ -196,14 +224,12 @@ async function notifyListeners(): Promise<void> {
   listeners.forEach((listener) => listener(queue));
 }
 
-
 //                    QUEUE MANAGEMENT
 async function getQueue(): Promise<QueueItem[]> {
   try {
     const data = await AsyncStorage.getItem(QUEUE_KEY);
     return data ? JSON.parse(data) : [];
   } catch (error) {
-
     return [];
   }
 }
@@ -212,9 +238,7 @@ async function saveQueue(queue: QueueItem[]): Promise<void> {
   try {
     await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
     await notifyListeners();
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 async function enqueue(
@@ -224,6 +248,11 @@ async function enqueue(
   userId: string,
   payload: Record<string, any>
 ): Promise<string> {
+  //  no permitir encolar operaciones de otro usuario
+  if (_currentValidUserId && userId !== _currentValidUserId) {
+    throw new Error("UID inválido para enqueue");
+  }
+
   const queue = await getQueue();
   const id = `op_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -242,6 +271,7 @@ async function enqueue(
   queue.push(item);
   await saveQueue(queue);
 
+  //  Reflejar cambio inmediato en caché local
   if (type === "CREATE") {
     await addItemToCache(collectionName, userId, {
       id: documentId,
@@ -252,8 +282,6 @@ async function enqueue(
   } else if (type === "DELETE") {
     await removeItemFromCache(collectionName, userId, documentId);
   }
-
-
 
   if (isOnline && !isProcessing) {
     setTimeout(() => processQueue(), 500);
@@ -311,7 +339,6 @@ function prepareDataForFirestore(
 
 async function processQueue(): Promise<{ success: number; failed: number }> {
   if (isProcessing) {
-
     return { success: 0, failed: 0 };
   }
 
@@ -320,7 +347,6 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
     netState.isConnected === true && netState.isInternetReachable !== false;
 
   if (!isOnline) {
-
     return { success: 0, failed: 0 };
   }
 
@@ -343,6 +369,30 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
   let currentQueue = [...queue];
 
   for (const item of pendingItems) {
+    // no procesar operaciones de otro usuario
+    if (_currentValidUserId && item.userId !== _currentValidUserId) {
+      // eliminar operación contaminante de la cola
+      currentQueue = currentQueue.filter((q) => q.id !== item.id);
+      await saveQueue(currentQueue);
+      continue;
+    }
+
+    //  No procesar UIDs temporales
+    if (item.userId.startsWith("temp_")) {
+      // permitir solo si aún existe registro pendiente
+      const pending = await AsyncStorage.getItem(
+        "@lifereminder/auth/pending_registrations"
+      );
+
+      if (!pending) {
+        // tempUid sin pendiente → eliminar
+        currentQueue = currentQueue.filter((q) => q.id !== item.id);
+        await saveQueue(currentQueue);
+      }
+
+      continue;
+    }
+
     const itemIndex = currentQueue.findIndex((q) => q.id === item.id);
     if (itemIndex >= 0) {
       currentQueue[itemIndex].status = "PROCESSING";
@@ -356,7 +406,6 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
       if (item.type === "CREATE") {
         const preparedData = prepareDataForFirestore(item.payload);
         await setDoc(docRef, preparedData);
-
         successCount++;
       } else if (item.type === "UPDATE") {
         const preparedData = prepareDataForFirestore(item.payload);
@@ -364,31 +413,29 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
 
         if (docSnap.exists()) {
           await updateDoc(docRef, preparedData);
-
         } else {
           await setDoc(docRef, preparedData);
-
         }
         successCount++;
       } else if (item.type === "DELETE") {
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
           await deleteDoc(docRef);
-        } else {
         }
         successCount++;
       }
 
+      // eliminar item procesado correctamente
       currentQueue = currentQueue.filter((q) => q.id !== item.id);
       await saveQueue(currentQueue);
     } catch (error: any) {
-      const itemIndex = currentQueue.findIndex((q) => q.id === item.id);
-      if (itemIndex >= 0) {
-        currentQueue[itemIndex].status = "FAILED";
-        currentQueue[itemIndex].retryCount++;
-        currentQueue[itemIndex].error = error?.message || "Error";
+      const idx = currentQueue.findIndex((q) => q.id === item.id);
+      if (idx >= 0) {
+        currentQueue[idx].status = "FAILED";
+        currentQueue[idx].retryCount++;
+        currentQueue[idx].error = error?.message || "Error";
 
-        if (currentQueue[itemIndex].retryCount >= 5) {
+        if (currentQueue[idx].retryCount >= 5) {
           currentQueue = currentQueue.filter((q) => q.id !== item.id);
         }
 
@@ -396,14 +443,12 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
       }
 
       failedCount++;
-
     }
   }
 
   lastSyncTime = new Date();
   isProcessing = false;
   await notifyListeners();
-
 
   return { success: successCount, failed: failedCount };
 }
@@ -426,16 +471,13 @@ async function retryFailed(): Promise<void> {
 async function clearQueue(): Promise<void> {
   await AsyncStorage.removeItem(QUEUE_KEY);
   await notifyListeners();
-
 }
 
 async function forceSync(): Promise<{ success: number; failed: number }> {
-
   return processQueue();
 }
 
-
-//              CACHE MANAGEMENT 
+//              CACHE MANAGEMENT
 
 async function saveToCache(
   collectionName: string,
@@ -443,6 +485,11 @@ async function saveToCache(
   remoteData: Array<Record<string, any>>
 ): Promise<void> {
   try {
+    // solo permitir cachear para el UID válido actual
+    if (_currentValidUserId && userId !== _currentValidUserId) {
+      return;
+    }
+
     const dataWithIds = remoteData.filter(
       (item): item is Record<string, any> & { id: string } =>
         typeof item?.id === "string" && item.id.length > 0
@@ -508,7 +555,6 @@ async function saveToCache(
         }
       }
 
-
       finalData.push(normalizeForStorage(mergedItem));
       processedIds.add(item.id);
     }
@@ -540,28 +586,51 @@ async function saveToCache(
       cachedAt: Date.now(),
       lastSyncedAt: Date.now(),
     };
-    await AsyncStorage.setItem(key, JSON.stringify(cached));
-  } catch (error) {
 
+    await AsyncStorage.setItem(key, JSON.stringify(cached));
+  } catch {
+    // silencioso
   }
 }
 
-async function getFromCache<T = Record<string, any>>(
+async function getFromCache<T = any>(
   collectionName: string,
   userId: string
 ): Promise<{ data: T[]; timestamp: number } | null> {
   try {
+    // Verificar que el userId solicitado es el actual
+    if (_currentValidUserId && userId !== _currentValidUserId) {
+      // Retornar vacío para evitar cargar datos incorrectos
+      return null;
+    }
+
     const key = getCacheKey(collectionName, userId);
     const cached = await AsyncStorage.getItem(key);
 
     if (cached) {
       const parsed = JSON.parse(cached) as CachedCollection;
+
+      // Verificar que los datos tienen el userId correcto
+      if (parsed.data && Array.isArray(parsed.data)) {
+        // Verificar que los items pertenecen al usuario correcto
+        const hasWrongUserId = parsed.data.some((item: any) => {
+          if (item.userId && item.userId !== userId) {
+            return true;
+          }
+          return false;
+        });
+
+        if (hasWrongUserId) {
+          await AsyncStorage.removeItem(key);
+          return null;
+        }
+      }
+
       return { data: parsed.data as T[], timestamp: parsed.cachedAt };
     }
 
     return null;
   } catch (error) {
-
     return null;
   }
 }
@@ -572,8 +641,12 @@ async function addItemToCache(
   item: Record<string, any>
 ): Promise<void> {
   try {
-    if (!item.id) {
+    // VALIDACIÓN: No agregar items de otro usuario
+    if (!validateUserId(userId, "addItemToCache")) {
+      return;
+    }
 
+    if (!item.id) {
       return;
     }
 
@@ -599,10 +672,7 @@ async function addItemToCache(
       lastSyncedAt: Date.now(),
     };
     await AsyncStorage.setItem(key, JSON.stringify(cacheData));
-
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 async function updateItemInCache(
@@ -638,13 +708,11 @@ async function updateItemInCache(
         ...updates,
       };
       updatedData[itemIndex] = normalizeForStorage(updatedData[itemIndex]);
-
     } else {
       updatedData = [
         ...cached.data,
         normalizeForStorage({ id: docId, ...updates }),
       ];
-
     }
 
     const key = getCacheKey(collectionName, userId);
@@ -654,9 +722,7 @@ async function updateItemInCache(
       lastSyncedAt: Date.now(),
     };
     await AsyncStorage.setItem(key, JSON.stringify(cacheData));
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 async function removeItemFromCache(
@@ -677,11 +743,7 @@ async function removeItemFromCache(
       lastSyncedAt: Date.now(),
     };
     await AsyncStorage.setItem(key, JSON.stringify(cacheData));
-
-
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 async function getItemFromCache(
@@ -695,7 +757,6 @@ async function getItemFromCache(
 
     return (cached.data as any).find((item: any) => item.id === docId) || null;
   } catch (error) {
-
     return null;
   }
 }
@@ -707,10 +768,7 @@ async function clearCache(
   try {
     const key = getCacheKey(collectionName, userId);
     await AsyncStorage.removeItem(key);
-
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
 
 async function clearAllUserCache(userId: string): Promise<void> {
@@ -722,11 +780,33 @@ async function clearAllUserCache(userId: string): Promise<void> {
 
     if (userCacheKeys.length > 0) {
       await AsyncStorage.multiRemove(userCacheKeys);
-
     }
-  } catch (error) {
+  } catch (error) {}
+}
 
-  }
+/**
+ * Limpia todos los datos de usuario sin importar el UID
+ */
+async function clearAllUserData(): Promise<void> {
+  try {
+    console.log("🧹 clearAllUserData: Limpiando TODOS los datos");
+
+    // 1. Obtener TODAS las claves de AsyncStorage
+    const allKeys = await AsyncStorage.getAllKeys();
+
+    // 2. Filtrar TODAS las claves de datos (@lifereminder/data)
+    const dataKeys = allKeys.filter(
+      (key) => key.startsWith(STORAGE_PREFIX) // "@lifereminder/data"
+    );
+
+    // 3. Eliminar TODAS las claves de datos
+    if (dataKeys.length > 0) {
+      await AsyncStorage.multiRemove(dataKeys);
+    }
+
+    // 4. Limpiar la cola de sincronización
+    await clearQueue();
+  } catch (error) {}
 }
 
 async function hasCachedData(userId: string): Promise<boolean> {
@@ -742,8 +822,6 @@ async function hasCachedData(userId: string): Promise<boolean> {
 
 async function debugCache(userId: string): Promise<void> {
   try {
-
-
     for (const collectionName of AUTO_SYNC_COLLECTIONS) {
       const cached = await getFromCache(collectionName, userId);
       if (cached && cached.data.length > 0) {
@@ -751,16 +829,13 @@ async function debugCache(userId: string): Promise<void> {
           (item: any) => item.isArchived === true || !!item.archivedAt
         ).length;
         const activeCount = cached.data.length - archivedCount;
-      } 
+      }
     }
 
     const queue = await getQueue();
     const userQueue = queue.filter((op) => op.userId === userId);
-  } catch (error) {
-
-  }
+  } catch (error) {}
 }
-
 
 //  MIGRAR NAMESPACE (tempUid -> realUid)
 
@@ -768,10 +843,12 @@ async function migrateUserNamespace(
   oldUid: string,
   newUid: string
 ): Promise<void> {
-  if (!oldUid || !newUid || oldUid === newUid) return;
+  if (!oldUid || !newUid || oldUid === newUid) {
+    return;
+  }
 
   try {
-
+    // 1️ Migrar keys de AsyncStorage
     const allKeys = await AsyncStorage.getAllKeys();
     const oldPrefix = `${STORAGE_PREFIX}/${oldUid}/`;
     const oldKeys = allKeys.filter((k) => k.startsWith(oldPrefix));
@@ -784,13 +861,15 @@ async function migrateUserNamespace(
         `${STORAGE_PREFIX}/${oldUid}/`,
         `${STORAGE_PREFIX}/${newUid}/`
       );
+
       await AsyncStorage.setItem(newKey, value);
       await AsyncStorage.removeItem(key);
     }
 
-
-
+    // 2️ Migrar cola de sincronización
     const queue = await getQueue();
+    const operationsToMigrate = queue.filter((item) => item.userId === oldUid);
+
     const updated = queue.map((item) => {
       if (item.userId === oldUid) {
         return { ...item, userId: newUid };
@@ -799,12 +878,10 @@ async function migrateUserNamespace(
     });
 
     await saveQueue(updated);
-
   } catch (err: any) {
-
+    throw err;
   }
 }
-
 
 //    SINCRONIZACIÓN
 
@@ -812,19 +889,20 @@ async function syncCollection(
   collectionName: string,
   userId: string
 ): Promise<any[]> {
+  if (_currentValidUserId && userId !== _currentValidUserId) {
+    return [];
+  }
+
   const netState = await NetInfo.fetch();
   isOnline =
     netState.isConnected === true && netState.isInternetReachable !== false;
 
   if (!isOnline) {
-
     const cached = await getFromCache(collectionName, userId);
     return cached?.data || [];
   }
 
   try {
-
-
     const collRef = collection(db, "users", userId, collectionName);
     const snapshot = await getDocs(collRef);
 
@@ -835,23 +913,19 @@ async function syncCollection(
 
     await saveToCache(collectionName, userId, data);
 
-
     const cached = await getFromCache(collectionName, userId);
     return cached?.data || data;
   } catch (error) {
-
     const cached = await getFromCache(collectionName, userId);
     return cached?.data || [];
   }
 }
 
 async function syncAllCollections(userId: string): Promise<void> {
-
   for (const collectionName of AUTO_SYNC_COLLECTIONS) {
     await syncCollection(collectionName, userId);
   }
 }
-
 
 //    ALIASES PARA COMPATIBILIDAD
 
@@ -891,7 +965,6 @@ const deleteLocalData = async (
 const updateCacheItem = updateItemInCache;
 const deleteCacheItem = removeItemFromCache;
 const addToCacheItem = addItemToCache;
-
 
 //                    UTILIDADES
 
@@ -960,6 +1033,10 @@ async function getActiveItems(
   collectionName: string,
   userId: string
 ): Promise<Record<string, any>[]> {
+  if (_currentValidUserId && userId !== _currentValidUserId) {
+    return [];
+  }
+
   const cached = await getFromCache(collectionName, userId);
   if (!cached?.data) return [];
 
@@ -996,7 +1073,6 @@ async function checkConnection(): Promise<boolean> {
   return isOnline;
 }
 
-
 //                    EXPORT
 
 export const syncQueueService = {
@@ -1022,6 +1098,10 @@ export const syncQueueService = {
   getItemFromCache,
   clearCache,
   clearAllUserCache,
+  clearAllUserData,
+  setCurrentValidUserId,
+  getCurrentValidUserId,
+
   hasCachedData,
   debugCache,
 

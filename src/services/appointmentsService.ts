@@ -1,10 +1,9 @@
 // src/services/appointmentsService.ts
 
-
 import { db } from "../config/firebaseConfig";
 import { collection, onSnapshot, query, orderBy } from "firebase/firestore";
 import { syncQueueService } from "./offline/SyncQueueService";
-
+import { offlineAuthService } from "./offline/OfflineAuthService";
 // ============================================================
 //                    TIPOS DE CITA
 // ============================================================
@@ -31,6 +30,11 @@ export async function createAppointment(
   data: Appointment,
   forcedId?: string
 ): Promise<string> {
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== userId) {
+    return "";
+  }
+
   const tempId =
     forcedId ?? `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -58,6 +62,9 @@ export async function updateAppointment(
   appointmentId: string,
   data: Partial<Appointment>
 ): Promise<void> {
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== userId) return;
+
   const updateData = {
     ...data,
     updatedAt: new Date().toISOString(),
@@ -73,11 +80,10 @@ export async function updateAppointment(
 }
 
 export async function deleteAppointment(appointmentId: string): Promise<void> {
-  const { auth } = await import("../config/firebaseConfig");
-  const userId = auth.currentUser?.uid;
+  const userId = syncQueueService.getCurrentValidUserId();
 
   if (!userId) {
-    throw new Error("No hay usuario autenticado");
+    throw new Error("No hay usuario válido");
   }
 
   await syncQueueService.enqueue(
@@ -98,8 +104,13 @@ export function listenAppointments(
   onChange: (appointments: Appointment[]) => void,
   onError?: (error: any) => void
 ): () => void {
-  // Primero cargar datos locales
+  let active = true;
+
+  // 1️ Cargar primero datos locales (protegido)
   loadLocalAppointments(userId).then((localAppts) => {
+    const validUid = syncQueueService.getCurrentValidUserId();
+    if (!active || !validUid || validUid !== userId) return;
+
     if (localAppts.length > 0) {
       onChange(localAppts);
     }
@@ -108,37 +119,52 @@ export function listenAppointments(
   const apptsRef = collection(db, "users", userId, "appointments");
   const q = query(apptsRef, orderBy("date", "asc"));
 
+  // 2️ Suscripción Firestore protegida por UID válido
   const unsubscribe = onSnapshot(
     q,
-    (snapshot) => {
-      const appointments: Appointment[] = snapshot.docs.map(
-        (doc) =>
-          ({
-            id: doc.id,
-            ...(doc.data() as any),
-          } as Appointment)
-      );
+    async (snapshot) => {
+      const validUid = syncQueueService.getCurrentValidUserId();
+      if (!active || !validUid || validUid !== userId) return;
+
+      const appointments: Appointment[] = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...(doc.data() as any),
+      }));
 
       onChange(appointments);
 
-      // Guardar en caché usando saveToCache (array completo)
       const apptsWithId = appointments.filter(
         (a): a is Appointment & { id: string } => !!a.id
       );
-      syncQueueService.saveToCache("appointments", userId, apptsWithId as any);
+
+      await syncQueueService.saveToCache(
+        "appointments",
+        userId,
+        apptsWithId as any
+      );
     },
-    (error) => {
-      loadLocalAppointments(userId).then((localAppts) => {
+    async (error) => {
+      const validUid = syncQueueService.getCurrentValidUserId();
+      if (!active || !validUid || validUid !== userId) return;
+
+      try {
+        const localAppts = await loadLocalAppointments(userId);
         if (localAppts.length > 0) {
           onChange(localAppts);
         }
-      });
+      } catch {
+        // no-op
+      }
 
       onError?.(error);
     }
   );
 
-  return unsubscribe;
+  // 3️ Cleanup correcto
+  return () => {
+    active = false;
+    unsubscribe();
+  };
 }
 
 async function loadLocalAppointments(userId: string): Promise<Appointment[]> {

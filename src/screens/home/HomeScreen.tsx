@@ -24,7 +24,7 @@ type MainSectionRoute =
   | "Appointments"
   | "History"
   | "CareNetwork"
-  | "MyPatients"; 
+  | "MyPatients";
 
 type SectionItem = {
   key: string;
@@ -39,7 +39,7 @@ type SectionItem = {
 const SECTIONS: SectionItem[] = [
   {
     key: "meds_today",
-    title: "Medicación de hoy",
+    title: "Medicación",
     subtitle: "Dosis pendientes",
     iconLib: "FontAwesome5",
     iconName: "pills",
@@ -48,8 +48,8 @@ const SECTIONS: SectionItem[] = [
   },
   {
     key: "new_reminder",
-    title: "Nuevo recordatorio",
-    subtitle: "Medicinas,citas",
+    title: "Hábitos",
+    subtitle: "Rutinas diarias",
     iconLib: "MaterialIcons",
     iconName: "add-alert",
     color: COLORS.secondary,
@@ -58,7 +58,7 @@ const SECTIONS: SectionItem[] = [
   {
     key: "appointments",
     title: "Citas médicas",
-    subtitle: "Próximas y historial",
+    subtitle: "Próximas citas",
     iconLib: "MaterialIcons",
     iconName: "event",
     color: COLORS.secondary,
@@ -67,7 +67,7 @@ const SECTIONS: SectionItem[] = [
   {
     key: "history",
     title: "Historial",
-    subtitle: "Adherencia y registros",
+    subtitle: "Registros pasados",
     iconLib: "MaterialIcons",
     iconName: "history",
     color: COLORS.primary,
@@ -76,13 +76,12 @@ const SECTIONS: SectionItem[] = [
   {
     key: "care_network",
     title: "Red de apoyo",
-    subtitle: "Familiares y cuidadores",
+    subtitle: "Familia y cuidadores",
     iconLib: "FontAwesome5",
     iconName: "users",
     color: COLORS.primary,
     route: "CareNetwork",
   },
-
 
   {
     key: "my_patients",
@@ -150,7 +149,6 @@ export default function HomeScreen({ navigation }: { navigation: HomeNav }) {
     </SafeAreaView>
   );
 }
-
 
 const { width: W, height: H } = Dimensions.get("window");
 const SCREEN_PADDING = 16;

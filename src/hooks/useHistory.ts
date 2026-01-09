@@ -1,12 +1,11 @@
 // src/hooks/useHistory.ts
 
-
 import { useCallback, useEffect, useMemo, useState } from "react";
 import NetInfo from "@react-native-community/netinfo";
 import { useIsFocused, RouteProp } from "@react-navigation/native";
 
 import { RootStackParamList } from "../navigation/StackNavigator";
-
+import { hasPermission } from "../services/careNetworkService";
 // Firebase
 import { auth, db } from "../config/firebaseConfig";
 import { collection, query, where, getDocs } from "firebase/firestore";
@@ -19,6 +18,11 @@ import { syncQueueService } from "../services/offline/SyncQueueService";
 import { isPastDateTime } from "../utils/dateUtils";
 
 type Route = RouteProp<RootStackParamList, "History">;
+type RouteParams = {
+  patientUid?: string;
+  patientName?: string;
+  accessMode?: "full" | "read-only" | "alerts-only" | "disabled";
+};
 
 const DAY_LABELS = ["L", "M", "X", "J", "V", "S", "D"] as const;
 
@@ -146,6 +150,37 @@ export function useHistory(args: { route: Route }) {
 
   const isCaregiverView =
     !!route.params?.patientUid && route.params.patientUid !== loggedUserUid;
+  const accessMode =
+    (route.params as RouteParams | undefined)?.accessMode ?? "full";
+
+  const canView = hasPermission(accessMode, "view");
+
+  if (!canView) {
+    return {
+      // estado
+      isLoading: false,
+      isOnline: false,
+      pendingChanges: 0,
+      ownerUid,
+      isCaregiverView,
+      blocked: true,
+
+      // listas vacías
+      habitHistory: [],
+      apptHistory: [],
+      medHistory: [],
+
+      // filtros
+      filterType: "all",
+      filterDay: null,
+      setFilterType: () => {},
+      setFilterDay: () => {},
+
+      // computados
+      filteredItems: [],
+      DAY_LABELS,
+    };
+  }
 
   // Monitor conectividad (igual que en tus otras pantallas)
   useEffect(() => {
@@ -396,7 +431,14 @@ export function useHistory(args: { route: Route }) {
       cancelled = true;
     };
   }, [ownerUid]);
+  // recargar historial cuando termina el sync offline
+  useEffect(() => {
+    if (!ownerUid) return;
 
+    if (isOnline && pendingChanges === 0) {
+      loadHistory();
+    }
+  }, [isOnline, pendingChanges, ownerUid, loadHistory]);
   // cargar cuando entras/enfocas pantalla
   useEffect(() => {
     if (!ownerUid) {
@@ -473,7 +515,7 @@ export function useHistory(args: { route: Route }) {
       habitHistory,
       apptHistory,
       medHistory,
-
+      blocked: false,
       // filters
       filterType,
       filterDay,

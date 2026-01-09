@@ -1,6 +1,5 @@
 // src/services/habitsService.ts
 
-
 import { db } from "../config/firebaseConfig";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { syncQueueService } from "./offline";
@@ -21,7 +20,6 @@ export interface HabitWithArchive {
   archivedAt?: string;
   createdAt?: any;
   updatedAt?: any;
-  // 🆕 Campos para alarmas pospuestas
   currentAlarmId?: string | null;
   snoozeCount?: number;
   snoozedUntil?: Date | null;
@@ -113,20 +111,28 @@ export function listenActiveHabits(
   onChange: (habits: HabitWithArchive[]) => void,
   onError?: (error: any) => void
 ): () => void {
-  // Primero cargar datos locales
+  let active = true;
+
+  // 1️ Cache local (protegido)
   loadLocalHabits(userId).then((localHabits) => {
+    const validUid = syncQueueService.getCurrentValidUserId();
+    if (!active || !validUid || validUid !== userId) return;
+
     if (localHabits.length > 0) {
       onChange(localHabits);
     }
   });
 
-  // Luego escuchar cambios en Firestore
   const habitsRef = collection(db, "users", userId, "habits");
   const q = query(habitsRef, where("isArchived", "==", false));
 
+  // 2️ Listener Firestore protegido
   const unsubscribe = onSnapshot(
     q,
-    (snapshot) => {
+    async (snapshot) => {
+      const validUid = syncQueueService.getCurrentValidUserId();
+      if (!active || !validUid || validUid !== userId) return;
+
       const habits: HabitWithArchive[] = snapshot.docs.map((doc) => {
         const data = doc.data();
         return {
@@ -137,48 +143,54 @@ export function listenActiveHabits(
         } as HabitWithArchive;
       });
 
-      // Ordenar por prioridad y nombre
+      // Orden estable
       const sorted = habits.sort((a, b) => {
         const priorityOrder = { alta: 0, normal: 1, baja: 2 };
         const aPriority = priorityOrder[a.priority || "normal"];
         const bPriority = priorityOrder[b.priority || "normal"];
 
-        if (aPriority !== bPriority) {
-          return aPriority - bPriority;
-        }
-
+        if (aPriority !== bPriority) return aPriority - bPriority;
         return (a.name || "").localeCompare(b.name || "");
       });
 
       onChange(sorted);
 
       const habitsWithId = sorted.filter(
-        (habit): habit is HabitWithArchive & { id: string } => !!habit.id
+        (h): h is HabitWithArchive & { id: string } => !!h.id
       );
-      syncQueueService.saveToCache("habits", userId, habitsWithId);
+
+      await syncQueueService.saveToCache("habits", userId, habitsWithId);
     },
-    (error) => {
+    async (error) => {
+      const validUid = syncQueueService.getCurrentValidUserId();
+      if (!active || !validUid || validUid !== userId) return;
 
-
-      // Si hay error, cargar desde cache local
-      loadLocalHabits(userId).then((localHabits) => {
+      try {
+        const localHabits = await loadLocalHabits(userId);
         if (localHabits.length > 0) {
-
           onChange(localHabits);
         }
-      });
+      } catch {
+        // no-op
+      }
 
       onError?.(error);
     }
   );
 
-  return unsubscribe;
+  // 3️ Cleanup real
+  return () => {
+    active = false;
+    unsubscribe();
+  };
 }
 
 /**
  *  Cargar hábitos desde cache local
  */
 async function loadLocalHabits(userId: string): Promise<HabitWithArchive[]> {
+  const validUid = syncQueueService.getCurrentValidUserId();
+  if (!validUid || validUid !== userId) return [];
   try {
     const cached = await syncQueueService.getFromCache<any>("habits", userId);
     const localData = cached?.data || [];
@@ -208,7 +220,6 @@ async function loadLocalHabits(userId: string): Promise<HabitWithArchive[]> {
       return (a.name || "").localeCompare(b.name || "");
     });
   } catch (error) {
-
     return [];
   }
 }
@@ -257,8 +268,6 @@ export async function getHabitById(
 
     return null;
   } catch (error) {
-
-
     // Fallback a cache local
     const localData = await syncQueueService.getLocalData(
       "habits",

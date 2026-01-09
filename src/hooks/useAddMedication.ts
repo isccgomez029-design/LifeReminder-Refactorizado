@@ -1,5 +1,4 @@
 // src/hooks/useAddMedication.ts
-// 🪝 Hook controlador para AddMedication: estado + validaciones + submit/delete + imagen
 
 import { useCallback, useMemo, useState } from "react";
 import { Alert } from "react-native";
@@ -38,8 +37,7 @@ export function useAddMedication(args: {
   const isEdit = !!medId; // True si se está editando un medicamento existente
 
   // UID del usuario autenticado (online u offline)
-  const loggedUid =
-    auth.currentUser?.uid || offlineAuthService.getCurrentUid() || "";
+  const loggedUid = offlineAuthService.getCurrentUid() || "";
 
   // UID del dueño real del medicamento (paciente)
   const ownerUid = params.patientUid || loggedUid || "";

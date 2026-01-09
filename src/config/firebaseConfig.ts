@@ -24,7 +24,6 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 // src/config/firebaseConfig.ts
 
-
 const firebaseConfig = {
   apiKey: "AIzaSyDsE3hWcGQn7sESt1ivUDjbMnVa8AUjHlM", // Clave pública de la API
   authDomain: "lifereminder-134bf.firebaseapp.com", // Dominio de autenticación
@@ -61,7 +60,6 @@ function createAuth(app: FirebaseApp): Auth {
       persistence: getReactNativePersistence(AsyncStorage),
     });
   } catch (err) {
-
     try {
       // Intenta inicializar Auth sin persistencia explícita
       return initializeAuth(app);

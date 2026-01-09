@@ -1,6 +1,5 @@
 // src/screens/auth/LoginScreen.tsx
-// ✅ Limpio: sin NetInfo, sin listeners, sin Firebase, sin validaciones locales
-// La lógica vive en OfflineAuthService + OfflineContext
+
 
 import React, { useState } from "react";
 import {
@@ -20,10 +19,8 @@ import { RootStackParamList } from "../../navigation/StackNavigator";
 import { LoginFormData, COLORS, FONT_SIZES } from "../../../types/index";
 import { MaterialIcons } from "@expo/vector-icons";
 
-// 🔹 Estado de conectividad global (ya existe en tu app)
 import { useIsOnline } from "../../context/OfflineContext";
 
-// 🔹 Servicio de autenticación offline-first
 import { offlineAuthService } from "../../services/offline/OfflineAuthService";
 
 const loginImage = require("../../../assets/login_image.png");
@@ -65,7 +62,7 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
           Alert.alert(
             "Modo sin conexión",
             "Has iniciado sesión con tus credenciales guardadas. Algunos datos pueden no estar actualizados.",
-            [{ text: "Continuar", onPress: () => navigation.replace("Home") }]
+            [{ text: "Continuar",  }]
           );
           return;
         }
@@ -99,7 +96,6 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
   };
 
   const handleRegister = (): void => {
-    // ✅ Offline-first: NO bloquear por estar offline.
     navigation.navigate("Register");
   };
 

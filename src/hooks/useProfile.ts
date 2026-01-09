@@ -1,6 +1,5 @@
 // src/hooks/useProfile.ts
 
-
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert } from "react-native";
 import * as ImagePicker from "expo-image-picker";
@@ -16,10 +15,11 @@ import {
 
 //  solo para re-leer cache
 import { syncQueueService } from "../services/offline/SyncQueueService";
-
+import { useOffline } from "../context/OfflineContext";
 export function useProfile() {
   const { firebaseUser, offlineUser, userId, userEmail, displayNameFallback } =
     getCurrentAuthInfo();
+  const { isOnline, pendingOperations } = useOffline();
 
   const [displayName, setDisplayName] = useState("");
   const [phone, setPhone] = useState("");
@@ -54,7 +54,20 @@ export function useProfile() {
   const applyProfileToState = useCallback(
     (data: any | null) => {
       if (!data) {
+        //  Perfil nuevo offline → estado limpio
         setDisplayName(displayNameFallback || "");
+        setPhone("");
+        setAge("");
+        setAllergies("");
+        setConditions("");
+        setPhotoUri(null);
+
+        setEmergencyName("");
+        setEmergencyRelation("");
+        setEmergencyPhone("");
+
+        setBloodType("");
+        setEmergencyNotes("");
         return;
       }
 
@@ -63,7 +76,9 @@ export function useProfile() {
       setAge(data.age ? String(data.age) : "");
       setAllergies(data.allergies || "");
       setConditions(data.conditions || "");
-      setPhotoUri(data.photoUri || null);
+      if (typeof data.photoUri === "string") {
+        setPhotoUri(data.photoUri);
+      }
 
       setEmergencyName(data.emergencyContactName || "");
       setEmergencyRelation(data.emergencyContactRelation || "");
@@ -103,7 +118,6 @@ export function useProfile() {
     };
   }, [userId, applyProfileToState]);
 
-
   useEffect(() => {
     if (!userId) return;
 
@@ -128,6 +142,22 @@ export function useProfile() {
       clearTimeout(t);
     };
   }, [userId, applyProfileToState]);
+
+  //  reaccionar cuando termina el sync offline
+  useEffect(() => {
+    if (!userId) return;
+
+    if (isOnline && pendingOperations === 0) {
+      (async () => {
+        try {
+          const data = await loadProfileOfflineFirst(userId);
+          applyProfileToState(data);
+        } catch {
+          // no-op
+        }
+      })();
+    }
+  }, [userId, isOnline, pendingOperations, applyProfileToState]);
 
   const toggleEdit = useCallback(() => {
     setIsEditing((prev) => !prev);
@@ -155,9 +185,7 @@ export function useProfile() {
       if (!result.canceled && result.assets?.[0]) {
         setPhotoUri(result.assets[0].uri);
       }
-    } catch (e) {
-
-    }
+    } catch (e) {}
   }, []);
 
   const handleTakePhoto = useCallback(async () => {
@@ -180,9 +208,7 @@ export function useProfile() {
       if (!result.canceled && result.assets?.[0]) {
         setPhotoUri(result.assets[0].uri);
       }
-    } catch (e) {
-
-    }
+    } catch (e) {}
   }, []);
 
   const handleSave = useCallback(async () => {

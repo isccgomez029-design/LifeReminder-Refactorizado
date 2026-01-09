@@ -1,37 +1,35 @@
 // src/services/offline/OfflineAlarmService.ts
 
-
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import { offlineAuthService } from "./OfflineAuthService";
 
+import {
+  areNotificationsEnabled,
+  isVibrationEnabled,
+} from "../settingsService";
 
-const ALARMS_STORAGE_KEY = "@lifereminder/alarms"; 
+const ALARMS_STORAGE_KEY = "@lifereminder/alarms";
 const ALARM_METADATA_KEY = "@lifereminder/alarm_metadata";
 
-
 export interface AlarmMetadata {
-  id: string; // notification ID de Expo
+  id: string;
   type: "med" | "habit";
-  itemId: string; // medId o habitId
+  itemId: string;
   itemName: string;
   ownerUid: string;
-  triggerDate: string; // ISO string (hora objetivo exacta)
+  triggerDate: string;
   createdAt: string;
   snoozeCount: number;
 
-  // Datos específicos de medicamentos
   dosis?: string;
   imageUri?: string;
   frecuencia?: string;
   cantidadActual?: number;
   cantidadPorToma?: number;
 
-  // Datos específicos de hábitos
   habitIcon?: string;
   habitLib?: "MaterialIcons" | "FontAwesome5";
-
-  // Info del paciente
   patientName?: string;
 }
 
@@ -83,12 +81,9 @@ class OfflineAlarmService {
     this.initializing = (async () => {
       try {
         await this.loadAlarmsFromStorage();
-        // reconcile NO debe bloquear tu app si algo falla
         await this.reconcileWithExpoNotifications().catch(() => {});
         this.initialized = true;
-
-      } catch (error) {
-
+      } catch {
       } finally {
         this.initializing = null;
       }
@@ -107,24 +102,16 @@ class OfflineAlarmService {
       parsed.forEach((alarm) => {
         if (alarm?.id) this.alarms.set(alarm.id, alarm);
       });
-
-
-    } catch (error) {
-
-    }
+    } catch {}
   }
 
   private async saveAlarmsToStorage(): Promise<void> {
     try {
       const data = Array.from(this.alarms.values());
       await AsyncStorage.setItem(ALARM_METADATA_KEY, JSON.stringify(data));
-
-    } catch (error) {
-
-    }
+    } catch {}
   }
 
-  // Sincronizar con notificaciones de Expo (eliminar metadatos huérfanos)
   private async reconcileWithExpoNotifications(): Promise<void> {
     try {
       const scheduled = await Notifications.getAllScheduledNotificationsAsync();
@@ -142,11 +129,8 @@ class OfflineAlarmService {
 
       if (removedCount > 0) {
         await this.saveAlarmsToStorage();
-
       }
-    } catch (error) {
-
-    }
+    } catch {}
   }
 
   // ============================================================
@@ -159,7 +143,6 @@ class OfflineAlarmService {
       date,
     };
   }
-
 
   private makeTimeIntervalTrigger(
     target: Date
@@ -177,17 +160,13 @@ class OfflineAlarmService {
     content: Notifications.NotificationContentInput;
     triggerDate: Date;
   }): Promise<string> {
-    // 1) intentar DATE (exacto)
     try {
       return await Notifications.scheduleNotificationAsync({
         content: args.content,
         trigger: this.makeDateTrigger(args.triggerDate),
       });
-    } catch (e) {
+    } catch {}
 
-    }
-
-    // 2) fallback TIME_INTERVAL
     return await Notifications.scheduleNotificationAsync({
       content: args.content,
       trigger: this.makeTimeIntervalTrigger(args.triggerDate),
@@ -215,9 +194,18 @@ class OfflineAlarmService {
   ): Promise<AlarmScheduleResult> {
     await this.initialize();
 
+    // SETTINGS: bloquear si están apagadas
+    if (!(await areNotificationsEnabled())) {
+      return {
+        notificationId: null,
+        metadata: null,
+        success: false,
+        error: "notifications-disabled",
+      };
+    }
+
     try {
       if (!isValidFutureDate(triggerDate)) {
-
         return {
           notificationId: null,
           metadata: null,
@@ -240,12 +228,16 @@ class OfflineAlarmService {
       const patientName =
         medication.patientName || (await this.getPatientName(ownerUid));
 
+      //  SETTINGS: vibración
+      const vibrate = await isVibrationEnabled();
+
       const content: Notifications.NotificationContentInput = {
         title: `💊 Hora de tomar ${medication.nombre}`,
         body: medication.dosis
           ? `Dosis: ${medication.dosis}`
           : "Es momento de tu medicamento",
         sound: "default",
+        vibrate: vibrate ? [0, 250, 250, 250] : undefined,
         priority: Notifications.AndroidNotificationPriority.MAX,
         data: {
           screen: "Alarm",
@@ -289,16 +281,11 @@ class OfflineAlarmService {
       };
 
       this.alarms.set(notificationId, metadata);
-
-      // ✅ persistir sin hacer pesada la UI
       await this.saveAlarmsToStorage();
       await sleep(50);
 
-
-
       return { notificationId, metadata, success: true };
     } catch (error: any) {
-
       return {
         notificationId: null,
         metadata: null,
@@ -326,9 +313,18 @@ class OfflineAlarmService {
   ): Promise<AlarmScheduleResult> {
     await this.initialize();
 
+    //  SETTINGS
+    if (!(await areNotificationsEnabled())) {
+      return {
+        notificationId: null,
+        metadata: null,
+        success: false,
+        error: "notifications-disabled",
+      };
+    }
+
     try {
       if (!isValidFutureDate(triggerDate)) {
-
         return {
           notificationId: null,
           metadata: null,
@@ -350,10 +346,13 @@ class OfflineAlarmService {
       const patientName =
         habit.patientName || (await this.getPatientName(ownerUid));
 
+      const vibrate = await isVibrationEnabled();
+
       const content: Notifications.NotificationContentInput = {
         title: `🔔 Recordatorio: ${habit.name}`,
         body: "Es momento de completar tu hábito.",
         sound: "default",
+        vibrate: vibrate ? [0, 250, 250, 250] : undefined,
         priority: Notifications.AndroidNotificationPriority.MAX,
         data: {
           screen: "Alarm",
@@ -394,10 +393,8 @@ class OfflineAlarmService {
       await this.saveAlarmsToStorage();
       await sleep(50);
 
-
       return { notificationId, metadata, success: true };
     } catch (error: any) {
-
       return {
         notificationId: null,
         metadata: null,
@@ -414,13 +411,10 @@ class OfflineAlarmService {
   async cancelAlarm(notificationId: string): Promise<boolean> {
     try {
       await Notifications.cancelScheduledNotificationAsync(notificationId);
-    } catch (e) {
-
-    }
+    } catch {}
 
     this.alarms.delete(notificationId);
     await this.saveAlarmsToStorage().catch(() => {});
-
     return true;
   }
 
@@ -440,8 +434,7 @@ class OfflineAlarmService {
     }
 
     for (const id of toDelete) {
-      const ok = await this.cancelAlarm(id);
-      if (ok) count++;
+      if (await this.cancelAlarm(id)) count++;
     }
 
     return count;
@@ -460,8 +453,7 @@ class OfflineAlarmService {
     }
 
     for (const id of toDelete) {
-      const ok = await this.cancelAlarm(id);
-      if (ok) count++;
+      if (await this.cancelAlarm(id)) count++;
     }
 
     return count;
@@ -469,16 +461,9 @@ class OfflineAlarmService {
 
   async cancelAllAlarms(): Promise<void> {
     await this.initialize();
-
-    try {
-      await Notifications.cancelAllScheduledNotificationsAsync();
-    } catch (e) {
-
-    }
-
+    await Notifications.cancelAllScheduledNotificationsAsync().catch(() => {});
     this.alarms.clear();
     await this.saveAlarmsToStorage().catch(() => {});
-
   }
 
   // ========================================
@@ -510,23 +495,20 @@ class OfflineAlarmService {
     return this.alarms.size;
   }
 
-  //        HELPERS //
+  // HELPERS
+
   private async getPatientName(userId: string): Promise<string> {
     try {
       const cachedUser = await offlineAuthService.getCachedUser();
       if (cachedUser?.displayName) return cachedUser.displayName;
       if (cachedUser?.email) return cachedUser.email.split("@")[0];
-      // fallback “bonito”
-      const id = safeString(userId, "");
-      return id ? `Paciente` : "Paciente";
+      return "Paciente";
     } catch {
       return "Paciente";
     }
   }
 
-
-  // PROGRAMAR SIGUIENTE ALARMA DE MEDICAMENTO //
-
+  // PROGRAMAR SIGUIENTE ALARMA DE MEDICAMENTO
 
   async scheduleNextMedicationAlarm(medication: {
     nombre: string;
@@ -540,7 +522,6 @@ class OfflineAlarmService {
   }): Promise<AlarmScheduleResult> {
     try {
       if (!medication.frecuencia) {
-
         return {
           notificationId: null,
           metadata: null,
@@ -551,7 +532,6 @@ class OfflineAlarmService {
 
       const match = medication.frecuencia.match(/^(\d{1,2}):(\d{2})$/);
       if (!match) {
-
         return {
           notificationId: null,
           metadata: null,
@@ -564,15 +544,6 @@ class OfflineAlarmService {
       const minutes = parseInt(match[2], 10);
       const intervalMs = (hours * 60 + minutes) * 60 * 1000;
 
-      if (intervalMs <= 0) {
-        return {
-          notificationId: null,
-          metadata: null,
-          success: false,
-          error: "Intervalo inválido",
-        };
-      }
-
       const nextTrigger = new Date(Date.now() + intervalMs);
 
       return await this.scheduleMedicationAlarm(nextTrigger, {
@@ -580,7 +551,6 @@ class OfflineAlarmService {
         snoozeCount: 0,
       });
     } catch (error: any) {
-
       return {
         notificationId: null,
         metadata: null,
@@ -590,7 +560,7 @@ class OfflineAlarmService {
     }
   }
 
-  //        LIMPIEZA DE ALARMAS VENCIDAS //
+  // LIMPIEZA DE ALARMAS VENCIDAS
 
   async cleanupExpiredAlarms(): Promise<number> {
     await this.initialize();
@@ -601,7 +571,6 @@ class OfflineAlarmService {
 
     for (const [id, metadata] of this.alarms.entries()) {
       const triggerDate = new Date(metadata.triggerDate);
-      // Si debió dispararse hace más de 1 hora, limpiarla
       if (
         isNaN(triggerDate.getTime()) ||
         triggerDate.getTime() < now.getTime() - 60 * 60 * 1000
@@ -617,12 +586,10 @@ class OfflineAlarmService {
 
     if (count > 0) {
       await this.saveAlarmsToStorage().catch(() => {});
-
     }
 
     return count;
   }
-
 
   async reprogramMissingAlarms(
     medications: Array<{
@@ -648,37 +615,28 @@ class OfflineAlarmService {
     for (const med of medications) {
       if (med.nextDueAt && med.nextDueAt > now && !med.currentAlarmId) {
         try {
-
-
           const result = await this.scheduleMedicationAlarm(med.nextDueAt, {
             nombre: med.nombre,
             dosis: med.dosis,
             imageUri: med.imageUri,
             medId: med.id,
-            ownerUid: ownerUid,
+            ownerUid,
             frecuencia: med.frecuencia,
             cantidadActual: med.cantidadActual,
             cantidadPorToma: med.cantidadPorToma,
             snoozeCount: 0,
           });
 
-          if (result.success) {
-            reprogrammed++;
-
-          } else {
-            errors++;
-          }
-        } catch (err) {
-
+          result.success ? reprogrammed++ : errors++;
+        } catch {
           errors++;
         }
       }
     }
+
     return { reprogrammed, errors };
   }
 }
-
-
 
 export const offlineAlarmService = new OfflineAlarmService();
 export default offlineAlarmService;

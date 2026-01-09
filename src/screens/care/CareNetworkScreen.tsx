@@ -111,7 +111,7 @@ const CareNetworkScreen: React.FC<{ navigation: Nav }> = ({ navigation }) => {
   const [saving, setSaving] = useState(false);
 
   //Obtener UID con soporte offline
-  const userId = auth.currentUser?.uid || offlineAuthService.getCurrentUid();
+  const userId = offlineAuthService.getCurrentUid();
 
   /** ================ Monitor de conectividad ================ */
   useEffect(() => {
