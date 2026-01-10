@@ -16,7 +16,6 @@ import { syncQueueService } from "./SyncQueueService";
 const QUEUE_KEY = "@lifereminder/auth/pending_reg_queue_v1";
 const PASS_KEY_PREFIX = "@lifereminder/auth/pending_reg_pass_v1/";
 
-// mismos keys que tu OfflineAuthService
 const USERS_ROOT = "@lifereminder/auth/users";
 const userKey = (email: string) => `${USERS_ROOT}/${email}/user`;
 
@@ -51,7 +50,7 @@ type CachedUser = {
   _lastOnlineLogin: number;
 };
 
-// ================== estado interno (como SyncQueueService) ==================
+// stado interno 
 let isInitialized = false;
 let isOnline = true;
 let isProcessing = false;
@@ -91,7 +90,7 @@ async function deletePendingPassword(id: string): Promise<void> {
   await AsyncStorage.removeItem(passKey(id));
 }
 
-//initialize / destroy 
+//initialize / destroy
 async function initialize(): Promise<void> {
   if (isInitialized) return;
 
@@ -133,7 +132,6 @@ function destroy(): void {
   isInitialized = false;
 }
 
-
 async function enqueueRegistration(input: {
   tempUid: string;
   email: string;
@@ -142,7 +140,7 @@ async function enqueueRegistration(input: {
   username?: string;
   rol?: string;
 }): Promise<string> {
-  await initialize(); 
+  await initialize();
 
   const id = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
@@ -163,7 +161,6 @@ async function enqueueRegistration(input: {
   queue.unshift(item);
   await saveQueue(queue);
 
-
   if (await isReallyOnline()) {
     setTimeout(() => {
       processQueue().catch(() => {});
@@ -172,8 +169,6 @@ async function enqueueRegistration(input: {
 
   return id;
 }
-
-
 
 async function processQueue(): Promise<{ success: number; failed: number }> {
   if (isProcessing) return { success: 0, failed: 0 };
@@ -206,7 +201,6 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
       let realUid: string | null = null;
 
       try {
-
         const cred = await createUserWithEmailAndPassword(
           secondaryAuth,
           item.email,
@@ -230,7 +224,6 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
 
         realUid = cred.user.uid;
       } catch (e: any) {
-
         if (e?.code === "auth/email-already-in-use") {
           const res = await signInWithEmailAndPassword(
             secondaryAuth,
@@ -248,7 +241,6 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
       }
 
       if (!realUid) throw new Error("No se pudo obtener UID real.");
-
 
       await syncQueueService.migrateUserNamespace(item.tempUid, realUid);
 

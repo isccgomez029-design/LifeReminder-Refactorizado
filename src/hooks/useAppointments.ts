@@ -14,10 +14,8 @@ import { deleteAndroidEvent } from "../services/deviceCalendarService";
 import { archiveAppointment } from "../utils/archiveHelpers";
 
 import { hasPermission } from "../services/careNetworkService";
+import { useFocusEffect } from "@react-navigation/native";
 
-// =======================
-// Helpers internos
-// =======================
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
 const toISO = (d: Date) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -222,6 +220,14 @@ export function useAppointments({ navigation, routeParams }: Params) {
     } catch {}
   }, [ownerUid]);
 
+  useFocusEffect(
+    useCallback(() => {
+      reloadFromCache();
+      syncQueueService.getPendingCount().then(setPendingChanges);
+      return () => {};
+    }, [reloadFromCache])
+  );
+
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener((state) => {
       const online =
@@ -238,6 +244,7 @@ export function useAppointments({ navigation, routeParams }: Params) {
     syncQueueService.getPendingCount().then(setPendingChanges);
     return () => unsubscribe();
   }, []);
+
   useEffect(() => {
     if (!ownerUid) return;
     let mounted = true;

@@ -15,10 +15,6 @@ import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { syncQueueService } from "./SyncQueueService";
 import { pendingAuthQueueService } from "./PendingAuthQueueService";
 
-// ============================================================
-//                         TIPOS
-// ============================================================
-
 export interface CachedUser {
   uid: string;
   email: string;
@@ -77,10 +73,6 @@ interface PendingRegistration {
   createdAt: number;
 }
 
-// ============================================================
-//                      CONSTANTES
-// ============================================================
-
 const STORAGE_KEYS = {
   USERS_ROOT: "@lifereminder/auth/users",
   LAST_USER_EMAIL: "@lifereminder/auth/last_user_email",
@@ -89,7 +81,6 @@ const STORAGE_KEYS = {
   LOGOUT_EXPLICIT: "@lifereminder/auth/logout_explicit",
 };
 
-// Helpers para paths por email
 const userKey = (email: string) => `${STORAGE_KEYS.USERS_ROOT}/${email}/user`;
 
 const credentialsKey = (email: string) =>
@@ -98,13 +89,10 @@ const credentialsKey = (email: string) =>
 const plaintextKey = (email: string) =>
   `${STORAGE_KEYS.USERS_ROOT}/${email}/plaintext`;
 
-// offline-first real
 const OFFLINE_SESSION_VALIDITY_MS: number | null = null;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
 const USERNAME_RE = /^[a-zA-Z0-9._-]{3,20}$/;
-
-//                    UTILIDADES
 
 async function generateSalt(): Promise<string> {
   const randomBytes = await Crypto.getRandomBytesAsync(16);
@@ -1155,7 +1143,7 @@ export class OfflineAuthService {
     } catch (error) {}
   }
 
-  // ==================== UTILIDADES ====================
+  //  UTILIDADES
 
   async clearAllCache(): Promise<void> {
     try {
@@ -1192,24 +1180,21 @@ export class OfflineAuthService {
   }
 
   getCurrentUid(): string | null {
-    //  1. Fuente de verdad ABSOLUTA: SyncQueue
+    // SyncQueue
     const validUid = syncQueueService.getCurrentValidUserId();
     if (validUid) {
       return validUid;
     }
 
-    //  2. Usuario offline en memoria (controlado por OfflineAuthService)
+    //   Usuario offline en memoria (controlado por OfflineAuthService)
     if (this.currentUser?.uid) {
       return this.currentUser.uid;
     }
 
-    //  3. Fallback extremo: Firebase Auth
     //  Solo se usa si todo lo demás falló
     if (auth.currentUser?.uid) {
       return auth.currentUser.uid;
     }
-
-    //  4. No hay UID válido
     return null;
   }
 
@@ -1230,9 +1215,7 @@ export class OfflineAuthService {
           }
         }
       }
-    } catch (error) {
-      log("❌ Error en getCurrentUidAsync", error);
-    }
+    } catch (error) {}
 
     return null;
   }
@@ -1262,7 +1245,7 @@ export class OfflineAuthService {
     }
   }
 
-  // ==================== LISTENERS ====================
+  //  LISTENERS
 
   addAuthStateListener(
     callback: (user: CachedUser | null) => void
