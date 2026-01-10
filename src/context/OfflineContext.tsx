@@ -9,161 +9,117 @@ import React, {
   ReactNode,
 } from "react";
 import NetInfo, { NetInfoState } from "@react-native-community/netinfo";
-// NetInfo permite detectar cambios de conectividad en React Native
 
 import { syncQueueService } from "../services/offline/SyncQueueService";
-// Servicio que maneja la cola de operaciones offline pendientes
+import { pendingAuthQueueService } from "../services/offline/PendingAuthQueueService";
 import { offlineAuthService } from "../services/offline/OfflineAuthService";
+
 interface OfflineContextValue {
-  isOnline: boolean; // Indica si el dispositivo tiene conexión a internet
-  pendingOperations: number; // Número de operaciones pendientes en la cola offline
-  isSyncing: boolean; // Indica si se está sincronizando actualmente
-  lastSyncTime: Date | null; // Fecha y hora de la última sincronización exitosa
-  syncNow: () => Promise<void>; // Función para forzar la sincronización manual
+  isOnline: boolean;
+  pendingOperations: number;
+  isSyncing: boolean;
+  lastSyncTime: Date | null;
+  syncNow: () => Promise<void>;
 }
 
-/* =====================================================
-   Valores por defecto del contexto
-   (se usan si un componente consume el contexto
-    fuera del Provider, evitando errores)
-===================================================== */
-
 const defaultValue: OfflineContextValue = {
-  isOnline: true, // Por defecto se asume online
-  pendingOperations: 0, // Sin operaciones pendientes
-  isSyncing: false, // No está sincronizando
-  lastSyncTime: null, // Aún no hay sincronización
-  syncNow: async () => {}, // Función vacía por defecto
+  isOnline: true,
+  pendingOperations: 0,
+  isSyncing: false,
+  lastSyncTime: null,
+  syncNow: async () => {},
 };
-
-/* Creación del contexto global */
 
 const OfflineContext = createContext<OfflineContextValue>(defaultValue);
 
-/* Props del Provider */
-
 interface OfflineProviderProps {
-  children: ReactNode; // Componentes hijos que tendrán acceso al contexto
+  children: ReactNode;
 }
 
-/* Provider del contexto Offline*/
-
-export function OfflineProvider(
-  props: OfflineProviderProps
-): React.ReactElement {
-  /* Estados internos del contexto */
-
-  const [isOnline, setIsOnline] = useState(true); // Estado de conectividad
-  const [pendingOperations, setPendingOperations] = useState(0); // Cola pendiente
-  const [isSyncing, setIsSyncing] = useState(false); // Estado de sincronización
-  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null); // Última sync
-
-  /* Función para sincronizar manualmente */
+export function OfflineProvider({
+  children,
+}: OfflineProviderProps): React.ReactElement {
+  const [isOnline, setIsOnline] = useState(true);
+  const [pendingOperations, setPendingOperations] = useState(0);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
 
   const syncNow = useCallback(async () => {
     if (isSyncing || !isOnline) return;
 
     setIsSyncing(true);
     try {
-      console.log("🔄 OfflineContext: Iniciando sincronización...");
-
-      // 🆕 PASO 1: Verificar y finalizar registros pendientes PRIMERO
       try {
-        await offlineAuthService.finalizeAllPendingRegistrations();
-      } catch (error) {
-        // Continuar con la sincronización incluso si falla
-      }
+        await pendingAuthQueueService.processQueue();
+      } catch {}
 
-      // PASO 2: Procesar la cola de operaciones
-      const result = await syncQueueService.processQueue();
+      try {
+        await pendingAuthQueueService.processQueue();
+        await syncQueueService.processQueue();
+      } catch {}
+
+      await syncQueueService.processQueue();
 
       const count = await syncQueueService.getPendingCount();
       setPendingOperations(count);
       setLastSyncTime(new Date());
-    } catch (error) {
     } finally {
       setIsSyncing(false);
     }
   }, [isSyncing, isOnline]);
 
-  /* Efecto: escuchar cambios de conectividad*/
-
   useEffect(() => {
     const handleConnectivityChange = (state: NetInfoState) => {
-      // Determina si hay conexión real a internet
       const online =
         state.isConnected === true && state.isInternetReachable !== false;
 
-      const wasOffline = !isOnline; // Guarda el estado anterior
-      setIsOnline(online); // Actualiza el estado actual
+      const wasOffline = !isOnline;
+      setIsOnline(online);
 
-      // Si vuelve la conexión después de estar offline → sincroniza automáticamente
       if (online && wasOffline) {
         syncNow();
       }
     };
 
-    // Se suscribe a cambios de red
     const unsubscribe = NetInfo.addEventListener(handleConnectivityChange);
-
-    // Verificación inicial del estado de conexión
     NetInfo.fetch().then(handleConnectivityChange);
 
-    // Limpieza del listener al desmontar
     return () => unsubscribe();
   }, [isOnline, syncNow]);
-
-  /* Efecto: actualizar periódicamente operaciones pendientes*/
 
   useEffect(() => {
     const updatePending = async () => {
       try {
-        // Consulta cuántas operaciones siguen pendientes
         const count = await syncQueueService.getPendingCount();
-        setPendingOperations(count); // Actualiza el estado
-      } catch {
-        // Fallo silencioso
-      }
+        setPendingOperations(count);
+      } catch {}
     };
 
-    updatePending(); // Actualización inicial
-
-    // Actualiza cada 5 segundos
+    updatePending();
     const interval = setInterval(updatePending, 5000);
 
-    // Limpieza del intervalo al desmontar
     return () => clearInterval(interval);
   }, []);
 
-  /*  Valor que se expone a los componentes hijos*/
-
   const value: OfflineContextValue = {
-    isOnline, // Estado de conectividad
-    pendingOperations, // Operaciones pendientes
-    isSyncing, // Estado de sincronización
-    lastSyncTime, // Última sincronización
-    syncNow, // Función para forzar sincronización
+    isOnline,
+    pendingOperations,
+    isSyncing,
+    lastSyncTime,
+    syncNow,
   };
 
-  /*  Render del Provider*/
-
-  return React.createElement(
-    OfflineContext.Provider, // Provider del contexto
-    { value: value }, // Valor expuesto
-    props.children // Componentes hijos
+  return (
+    <OfflineContext.Provider value={value}>{children}</OfflineContext.Provider>
   );
 }
 
-/*  Hook para consumir TODO el contexto*/
-
 export function useOffline(): OfflineContextValue {
-  return useContext(OfflineContext); // Devuelve el contexto completo
+  return useContext(OfflineContext);
 }
 
-/* Hook simplificado para solo saber si hay internet*/
-
 export function useIsOnline(): boolean {
-  const { isOnline } = useOffline(); // Extrae solo isOnline
+  const { isOnline } = useOffline();
   return isOnline;
 }
 

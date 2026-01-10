@@ -262,13 +262,7 @@ export async function fixExistingInvitation(
   }
 }
 
-/* ============================================================
- *            INVITACIONES DE CUIDADO
- * ============================================================ */
 
-/**
- * Escuchar invitaciones pendientes del cuidador
- */
 export function listenCareInvites(
   caregiverUid: string,
   onData: (invites: CareInvite[]) => void,
@@ -340,9 +334,6 @@ export async function acceptCareInvite(
   }
 }
 
-/**
- * Rechazar invitación de cuidado
- */
 export async function rejectCareInvite(
   inviteId: string,
   patientUid: string
@@ -359,13 +350,8 @@ export async function rejectCareInvite(
   }
 }
 
-/* ============================================================
- *                  MIS PACIENTES
- * ============================================================ */
 
-/**
- * Escuchar lista de pacientes del cuidador
- */
+
 export function listenMyPatients(
   caregiverUid: string,
   onData: (patients: PatientLink[]) => void,
@@ -412,9 +398,7 @@ export function listenMyPatients(
   );
 }
 
-/**
- * Cargar foto de perfil de un paciente
- */
+
 export async function loadPatientPhoto(
   patientUid: string
 ): Promise<string | null> {
@@ -444,9 +428,7 @@ export async function loadPatientPhoto(
   }
 }
 
-/**
- * Cargar fotos de múltiples pacientes
- */
+
 export async function loadPatientsPhotos(
   patients: PatientLink[]
 ): Promise<Record<string, string>> {
@@ -460,13 +442,8 @@ export async function loadPatientsPhotos(
   return photos;
 }
 
-/* ============================================================
- *          NOTIFICACIONES A CUIDADORES
- * ============================================================ */
 
-/**
- * Notificar a cuidadores sobre incumplimiento
- */
+
 export async function notifyCaregiversAboutNoncompliance(params: {
   patientUid: string;
   patientName?: string;
@@ -530,9 +507,7 @@ export async function notifyCaregiversAboutNoncompliance(params: {
   }
 }
 
-/**
- * Notificar a cuidadores sobre descarte de alarma
- */
+
 export async function notifyCaregiversAboutDismissal(params: {
   patientUid: string;
   patientName?: string;
@@ -611,10 +586,6 @@ export async function notifyCaregiversAboutDismissal(params: {
     return { success: false, notifiedCount: 0, error: error?.message };
   }
 }
-
-/**
- * Registrar evento de posposición
- */
 export async function logSnoozeEvent(params: {
   patientUid: string;
   itemId: string;
@@ -649,9 +620,6 @@ export async function logSnoozeEvent(params: {
   }
 }
 
-/**
- * Registrar evento de descarte
- */
 export async function logDismissalEvent(params: {
   patientUid: string;
   itemId: string;
@@ -678,9 +646,6 @@ export async function logDismissalEvent(params: {
   }
 }
 
-/**
- * Registrar cumplimiento exitoso
- */
 export async function logComplianceSuccess(params: {
   patientUid: string;
   itemId: string;
@@ -705,10 +670,6 @@ export async function logComplianceSuccess(params: {
 
   }
 }
-
-/* ============================================================
- *                    UTILIDADES
- * ============================================================ */
 
 export function getAccessModeLabel(mode: CareAccessMode): string {
   const labels: Record<CareAccessMode, string> = {

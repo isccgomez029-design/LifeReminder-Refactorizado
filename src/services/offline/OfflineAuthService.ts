@@ -13,6 +13,7 @@ import {
 } from "firebase/auth";
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { syncQueueService } from "./SyncQueueService";
+import { pendingAuthQueueService } from "./PendingAuthQueueService";
 
 // ============================================================
 //                         TIPOS
@@ -183,10 +184,6 @@ export class OfflineAuthService {
       }
     });
 
-    //  1. FINALIZAR REGISTROS OFFLINE PENDIENTES PRIMERO
-    await this.finalizeAllPendingRegistrations();
-
-    //  2. SOLO DESPUÉS intentar restaurar Firebase
     await this.attemptFirebaseRestore();
 
     const cachedUser = await this.restoreSession();
@@ -490,6 +487,14 @@ export class OfflineAuthService {
       syncQueueService.setCurrentValidUserId(tempUid);
       this.notifyAuthStateListeners(localUser);
       await syncQueueService.initialize();
+      await pendingAuthQueueService.enqueueRegistration({
+        tempUid,
+        email,
+        password,
+        displayName: fullName,
+        username,
+        rol: "patient",
+      });
 
       return { success: true, tempUid };
     } catch (err: any) {
@@ -1120,9 +1125,6 @@ export class OfflineAuthService {
 
   private async syncSessionOnReconnect(): Promise<void> {
     try {
-      //  Procesar registros pendientes primero
-      await this.finalizeAllPendingRegistrations();
-
       const offlineUid = this.getCurrentUid();
 
       // Si no hay usuario offline se permitira  Firebase

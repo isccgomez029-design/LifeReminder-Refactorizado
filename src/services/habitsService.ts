@@ -4,9 +4,6 @@ import { db } from "../config/firebaseConfig";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { syncQueueService } from "./offline";
 
-// ============================================================
-//                    TIPOS DE HÁBITO
-// ============================================================
 
 export interface HabitWithArchive {
   id?: string;
@@ -26,13 +23,7 @@ export interface HabitWithArchive {
   lastSnoozeAt?: Date | null;
 }
 
-// ============================================================
-//                    FUNCIONES CRUD
-// ============================================================
 
-/**
- * CREAR hábito (con soporte offline)
- */
 export async function createHabit(
   userId: string,
   data: HabitWithArchive
@@ -54,9 +45,6 @@ export async function createHabit(
   return tempId;
 }
 
-/**
- * ACTUALIZAR hábito (con soporte offline)
- */
 export async function updateHabit(
   userId: string,
   habitId: string,
@@ -76,9 +64,6 @@ export async function updateHabit(
   );
 }
 
-/**
- * ARCHIVAR hábito (con soporte offline)
- */
 export async function archiveHabit(
   userId: string,
   habitId: string
@@ -89,9 +74,7 @@ export async function archiveHabit(
   });
 }
 
-/**
- *  ELIMINAR hábito (con soporte offline)
- */
+
 export async function deleteHabit(
   userId: string,
   habitId: string
@@ -99,13 +82,7 @@ export async function deleteHabit(
   await syncQueueService.enqueue("DELETE", "habits", habitId, userId, {});
 }
 
-// ============================================================
-//              FUNCIONES DE LECTURA (CON CACHE)
-// ============================================================
 
-/**
- *  Escuchar hábitos activos en tiempo real (con fallback a cache local)
- */
 export function listenActiveHabits(
   userId: string,
   onChange: (habits: HabitWithArchive[]) => void,
@@ -185,9 +162,7 @@ export function listenActiveHabits(
   };
 }
 
-/**
- *  Cargar hábitos desde cache local
- */
+
 async function loadLocalHabits(userId: string): Promise<HabitWithArchive[]> {
   const validUid = syncQueueService.getCurrentValidUserId();
   if (!validUid || validUid !== userId) return [];
@@ -224,9 +199,7 @@ async function loadLocalHabits(userId: string): Promise<HabitWithArchive[]> {
   }
 }
 
-/**
- * Obtener un hábito por ID (con fallback a cache)
- */
+
 export async function getHabitById(
   userId: string,
   habitId: string

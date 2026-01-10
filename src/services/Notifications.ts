@@ -626,13 +626,8 @@ export async function logComplianceSuccess(params: {
   } catch (error) {}
 }
 
-/* ===========================================================
- *           UTILIDADES Y HELPERS
- * ============================================================ */
 
-/**
- * Obtiene el color según la severidad
- */
+
 export function getSeverityColor(severity: NotificationSeverity): string {
   const colors: Record<NotificationSeverity, string> = {
     high: "#D32F2F",
@@ -642,9 +637,7 @@ export function getSeverityColor(severity: NotificationSeverity): string {
   return colors[severity] || "#777777";
 }
 
-/**
- * Formatea timestamp a texto legible (relativo o absoluto)
- */
+
 export function formatNotificationDate(timestamp: any): string {
   if (!timestamp) return "";
 
@@ -669,16 +662,11 @@ export function formatNotificationDate(timestamp: any): string {
   }
 }
 
-/**
- * Cuenta notificaciones no leídas
- */
+
 export function getUnreadCount(notifications: CareNotification[]): number {
   return notifications.filter((n) => !n.read).length;
 }
 
-/**
- * Filtra notificaciones por severidad
- */
 export function filterBySeverity(
   notifications: CareNotification[],
   severity: NotificationSeverity
@@ -686,9 +674,7 @@ export function filterBySeverity(
   return notifications.filter((n) => n.severity === severity);
 }
 
-/**
- * Filtra notificaciones por paciente
- */
+
 export function filterByPatient(
   notifications: CareNotification[],
   patientUid: string
@@ -696,9 +682,7 @@ export function filterByPatient(
   return notifications.filter((n) => n.patientUid === patientUid);
 }
 
-/**
- * Agrupa notificaciones por paciente
- */
+
 export function groupByPatient(
   notifications: CareNotification[]
 ): Record<string, CareNotification[]> {

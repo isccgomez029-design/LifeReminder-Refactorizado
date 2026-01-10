@@ -50,14 +50,6 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-/**
- *  VERSIÓN CORREGIDA
- *
- * Ahora devuelve AMBOS usuarios:
- * - firebaseUser: Siempre disponible si Firebase Auth tiene sesión (para cambios de email/contraseña)
- * - offlineUser: Usuario offline activo (prioridad para datos de perfil)
- * - userId: Prioriza offline, luego firebase
- */
 export function getCurrentAuthInfo() {
   const offlineUser = offlineAuthService.getCurrentUser();
   const offlineUid = offlineAuthService.getCurrentUid();
@@ -80,22 +72,17 @@ export function getCurrentAuthInfo() {
   };
 }
 
-/**
- *  OFFLINE-FIRST:
- * 1) Retorna cache inmediato (sin colgar)
- * 2) Si hay internet, hace getDoc en background con timeout
- * 3) Si llega remoto, actualiza cache (la UI puede re-leer luego)
- */
+
 export async function loadProfileOfflineFirst(
   userId: string
 ): Promise<any | null> {
-  //  VALIDACIÓN CRÍTICA: solo permitir el UID activo
+
   const validUid = syncQueueService.getCurrentValidUserId();
   if (validUid && userId !== validUid) {
     return null;
   }
 
-  // 1) cache (rápido)
+
   let data: any | null = null;
   try {
     const cached = await syncQueueService.getFromCache("profile", userId);
@@ -105,10 +92,10 @@ export async function loadProfileOfflineFirst(
     // no-op
   }
 
-  // 2) Firestore en background (PROTEGIDO)
+
   void (async () => {
     try {
-      //  Revalidar UID antes de tocar red
+
       const stillValidUid = syncQueueService.getCurrentValidUserId();
       if (!stillValidUid || stillValidUid !== userId) return;
 
@@ -137,7 +124,7 @@ export async function saveProfileOfflineFirst(args: {
 }): Promise<void> {
   const { userId, profileData } = args;
 
-  //  VALIDACIÓN CRÍTICA: solo permitir escribir para el UID activo
+
   const validUid = syncQueueService.getCurrentValidUserId();
   if (!validUid || validUid !== userId) {
     //  Evita escribir perfil de otro usuario
@@ -208,10 +195,7 @@ export async function changeEmailOnline(args: {
   );
 }
 
-/**
- *  Cambiar contraseña (solo online)
- * Requiere firebaseUser y conexión a internet
- */
+
 export async function changePasswordOnline(args: {
   firebaseUser: User;
   currentPassword: string;
@@ -223,13 +207,12 @@ export async function changePasswordOnline(args: {
     throw new Error("NO_EMAIL");
   }
 
-  // Reautenticar con contraseña actual
+
   const cred = EmailAuthProvider.credential(
     firebaseUser.email,
     currentPassword
   );
   await reauthenticateWithCredential(firebaseUser, cred);
 
-  // Actualizar contraseña en Firebase Auth
   await updatePassword(firebaseUser, newPassword);
 }

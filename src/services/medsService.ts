@@ -19,9 +19,6 @@ import { archiveMedication as archiveMedicationHelper } from "../utils/archiveHe
 import { normalizeTime } from "../utils/timeUtils";
 import { shouldNotifyMedLow20, shouldNotifyMedLow10 } from "./settingsService";
 
-// ============================================================
-//                    TIPOS DE MEDICAMENTO
-// ============================================================
 
 export interface Medication {
   id?: string;
@@ -58,9 +55,6 @@ export interface Medication {
   lastSnoozeAt?: Date | null;
 }
 
-// ============================================================
-//                    HELPERS FECHAS / ESTADO
-// ============================================================
 
 export function freqToMs(freq?: string): number {
   if (!freq) return 0;
@@ -139,9 +133,6 @@ export function isMedTaken(med: Medication, now: Date): boolean {
   return false;
 }
 
-// ============================================================
-//                    FUNCIONES CRUD (OFFLINE FIRST)
-// ============================================================
 
 export async function createMedication(
   userId: string,
@@ -204,9 +195,7 @@ export async function deleteMedication(
   await syncQueueService.enqueue("DELETE", "medications", medId, userId, {});
 }
 
-/**
- *  Archivar (reusa helper existente)
- */
+
 export async function archiveMedication(
   userId: string,
   medId: string,
@@ -215,43 +204,36 @@ export async function archiveMedication(
   await archiveMedicationHelper(userId, medId, medData);
 }
 
-// ============================================================
-//              FUNCIONES DE LECTURA (CACHE + FIRESTORE)
-// ============================================================
 
 export async function getActiveMedsFromCache(
   userId: string
 ): Promise<Medication[]> {
-  const validUid = syncQueueService.getCurrentValidUserId();
-  if (!validUid || validUid !== userId) return [];
 
   const activeItems = await syncQueueService.getActiveItems(
     "medications",
     userId
   );
-
   if (!activeItems) return [];
   return activeItems.map((x: any) => normalizeMedication(x));
 }
 
-/**
- * Suscripción Firestore: guarda snapshot en cache y emite "active items"
- */
 export function subscribeMedicationsFirestore(
   userId: string,
   onChange: (medications: Medication[]) => void,
   onError?: (error: any) => void
 ): Unsubscribe {
   const medsRef = collection(db, "users", userId, "medications");
-  const q = query(medsRef, where("isArchived", "==", false));
+
+
+  const q = query(medsRef);
 
   return onSnapshot(
     q,
     async (snapshot) => {
-      const validUid = syncQueueService.getCurrentValidUserId();
-      if (!validUid || validUid !== userId) return;
 
       const items = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+      // Guardar cache completo (activos + archivados) para que History también funcione
       await syncQueueService.saveToCache("medications", userId, items);
 
       const active = await syncQueueService.getActiveItems(
@@ -291,9 +273,6 @@ export async function getMedicationById(
   return normalizeMedication({ id: medId, ...localData });
 }
 
-// ============================================================
-//                 ACCIONES DE NEGOCIO (MedsToday)
-// ============================================================
 
 type MarkTakenInput = {
   ownerUid: string;
@@ -428,9 +407,7 @@ type ReprogramInput = {
   patientName?: string;
 };
 
-/**
- * Si un medicamento tiene nextDueAt futuro pero no tiene currentAlarmId, reprograma la alarma.
- */
+
 export async function reprogramMissingAlarms(
   input: ReprogramInput
 ): Promise<void> {
@@ -458,13 +435,13 @@ export async function reprogramMissingAlarms(
           );
 
           if (result.success && result.notificationId) {
-            // Aquí SÍ tiene sentido actualizar cache directo, pero no es obligatorio.
-            // Si lo dejas, NO encolas UPDATE para evitar ruido.
             await syncQueueService.updateItemInCache(
               "medications",
               ownerUid,
               med.id,
-              { currentAlarmId: result.notificationId }
+              {
+                currentAlarmId: result.notificationId,
+              }
             );
           }
         } catch {
@@ -475,9 +452,6 @@ export async function reprogramMissingAlarms(
   }
 }
 
-// ============================================================
-//         AddMedicationScreen: validación + upsert + delete
-// ============================================================
 
 export function validateFrequency(freq: string): {
   ok: boolean;
@@ -578,7 +552,6 @@ export async function upsertMedicationWithAlarm(
 
   const dosisString = `${doseAmount} ${doseUnit}`;
 
-  //  Si editas: cancela alarmas previas para evitar duplicados
   if (isEdit && medId) {
     await offlineAlarmService.cancelAllAlarmsForItem(medId, ownerUid);
   }
@@ -674,7 +647,6 @@ export async function deleteMedicationWithAlarms(input: {
 
   await offlineAlarmService.cancelAllAlarmsForItem(medId, ownerUid);
 
-  //  enqueue DELETE ya quita del cache
   await syncQueueService.enqueue("DELETE", "medications", medId, ownerUid, {});
 }
 

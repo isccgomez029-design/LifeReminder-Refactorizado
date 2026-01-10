@@ -4,18 +4,14 @@
     "slug": "lifereminderts",
     "version": "1.0.0",
     "orientation": "portrait",
-
     "icon": "./assets/icon.png",
-
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-
     "splash": {
       "image": "./assets/login_image.png",
       "resizeMode": "contain",
       "backgroundColor": "#0F766E"
     },
-
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
@@ -23,18 +19,15 @@
         "NSUserNotificationsUsageDescription": "Esta app necesita enviar notificaciones para recordatorios de medicamentos y hábitos."
       }
     },
-
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#0F766E"
       },
-
       "notification": {
         "icon": "./assets/notificaciones.png",
         "color": "#0F766E"
       },
-
       "permissions": [
         "READ_CALENDAR",
         "WRITE_CALENDAR",
@@ -45,18 +38,14 @@
         "VIBRATE",
         "WAKE_LOCK"
       ],
-
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.carlos_gr2303.lifereminderts"
     },
-
     "web": {
       "favicon": "./assets/favicon.png"
     },
-
     "plugins": ["expo-notifications", "expo-font"],
-
     "extra": {
       "eas": {
         "projectId": "4ee6c815-7592-47e6-8376-f1ed6758f1d9"

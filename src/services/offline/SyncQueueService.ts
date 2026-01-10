@@ -25,7 +25,7 @@ export interface QueueItem {
   type: OperationType;
   collection: string;
   documentId: string;
-  userId: string;
+  userId: string; 
   payload: Record<string, any>;
   timestamp: number;
   retryCount: number;
@@ -60,10 +60,11 @@ export interface SyncResult {
   error?: string;
 }
 
-//                    ESTADO INTERNO
+// ESTADO INTERNO
 let isOnline = true;
 let isProcessing = false;
 let lastSyncTime: Date | null = null;
+
 let listeners: Array<(queue: QueueItem[]) => void> = [];
 let isInitialized = false;
 let netInfoUnsubscribe: (() => void) | null = null;
@@ -75,50 +76,22 @@ const AUTO_SYNC_COLLECTIONS = [
   "history",
 ];
 
-// ============================================================
-//                    VALIDACIÓN DE USUARIO
-// ============================================================
+//    UID ACTUAL (solo para procesar cola, NO para cache)
 
 let _currentValidUserId: string | null = null;
 
-/**
- * Establece el UID del usuario actual válido
- * Debe llamarse desde OfflineAuthService cuando cambia el usuario
- */
+
 function setCurrentValidUserId(userId: string | null): void {
-  const prev = _currentValidUserId;
   _currentValidUserId = userId;
 }
 
-/**
- * Obtiene el UID del usuario actual válido
- */
+
 function getCurrentValidUserId(): string | null {
   return _currentValidUserId;
 }
 
-// ============================================================
-//           HELPER DE VALIDACIÓN
-// ============================================================
-
-/**
- * Valida que el userId sea el usuario actual válido
- * Retorna true si es válido, false si no
- */
-function validateUserId(userId: string, methodName: string): boolean {
-  // Si no hay UID válido establecido, permitir (inicialización)
-  if (!_currentValidUserId) {
-    return true;
-  }
-
-  //  Validar que coincida
-  if (userId !== _currentValidUserId) {
-    return false;
-  }
-  return true;
-}
-
 //  UTILIDADES
+
 
 function getCacheKey(collectionName: string, userId: string): string {
   return `${STORAGE_PREFIX}/${userId}/${collectionName}`;
@@ -164,21 +137,20 @@ function normalizeForStorage(value: any): any {
   return value;
 }
 
-//                    INICIALIZACIÓN
+// INICIALIZACIÓN
+
 
 async function initialize(): Promise<void> {
-  if (isInitialized) {
-    return;
-  }
+  if (isInitialized) return;
 
-  if (netInfoUnsubscribe) {
-    netInfoUnsubscribe();
-  }
+  if (netInfoUnsubscribe) netInfoUnsubscribe();
 
   netInfoUnsubscribe = NetInfo.addEventListener((state: NetInfoState) => {
     const wasOffline = !isOnline;
+
     isOnline =
       state.isConnected === true && state.isInternetReachable !== false;
+
 
     if (isOnline && wasOffline) {
       setTimeout(() => processQueue(), 1500);
@@ -193,10 +165,8 @@ async function initialize(): Promise<void> {
     (item) => item.status === "PENDING" || item.status === "FAILED"
   ).length;
 
-  if (pendingCount > 0) {
-    if (isOnline) {
-      setTimeout(() => processQueue(), 2000);
-    }
+  if (pendingCount > 0 && isOnline) {
+    setTimeout(() => processQueue(), 2000);
   }
 
   isInitialized = true;
@@ -211,7 +181,9 @@ function destroy(): void {
   isInitialized = false;
 }
 
-//                    QUEUE LISTENERS
+//QUEUE LISTENERS
+
+
 function addListener(callback: (queue: QueueItem[]) => void): () => void {
   listeners.push(callback);
   return () => {
@@ -224,12 +196,12 @@ async function notifyListeners(): Promise<void> {
   listeners.forEach((listener) => listener(queue));
 }
 
-//                    QUEUE MANAGEMENT
+//  QUEUE MANAGEMENT
 async function getQueue(): Promise<QueueItem[]> {
   try {
     const data = await AsyncStorage.getItem(QUEUE_KEY);
     return data ? JSON.parse(data) : [];
-  } catch (error) {
+  } catch {
     return [];
   }
 }
@@ -238,7 +210,9 @@ async function saveQueue(queue: QueueItem[]): Promise<void> {
   try {
     await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
     await notifyListeners();
-  } catch (error) {}
+  } catch {
+
+  }
 }
 
 async function enqueue(
@@ -248,11 +222,6 @@ async function enqueue(
   userId: string,
   payload: Record<string, any>
 ): Promise<string> {
-  //  no permitir encolar operaciones de otro usuario
-  if (_currentValidUserId && userId !== _currentValidUserId) {
-    throw new Error("UID inválido para enqueue");
-  }
-
   const queue = await getQueue();
   const id = `op_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -271,7 +240,7 @@ async function enqueue(
   queue.push(item);
   await saveQueue(queue);
 
-  //  Reflejar cambio inmediato en caché local
+
   if (type === "CREATE") {
     await addItemToCache(collectionName, userId, {
       id: documentId,
@@ -309,9 +278,8 @@ async function getStats(): Promise<SyncStats> {
   };
 }
 
-// ============================================================
-//                    PROCESS QUEUE
-// ============================================================
+// PROCESS QUEUE
+
 
 function prepareDataForFirestore(
   data: Record<string, any>
@@ -338,17 +306,13 @@ function prepareDataForFirestore(
 }
 
 async function processQueue(): Promise<{ success: number; failed: number }> {
-  if (isProcessing) {
-    return { success: 0, failed: 0 };
-  }
+  if (isProcessing) return { success: 0, failed: 0 };
 
   const netState = await NetInfo.fetch();
   isOnline =
     netState.isConnected === true && netState.isInternetReachable !== false;
 
-  if (!isOnline) {
-    return { success: 0, failed: 0 };
-  }
+  if (!isOnline) return { success: 0, failed: 0 };
 
   isProcessing = true;
   await notifyListeners();
@@ -369,27 +333,21 @@ async function processQueue(): Promise<{ success: number; failed: number }> {
   let currentQueue = [...queue];
 
   for (const item of pendingItems) {
-    // no procesar operaciones de otro usuario
-    if (_currentValidUserId && item.userId !== _currentValidUserId) {
-      // eliminar operación contaminante de la cola
-      currentQueue = currentQueue.filter((q) => q.id !== item.id);
-      await saveQueue(currentQueue);
-      continue;
-    }
-
-    //  No procesar UIDs temporales
+    // 1) No procesar UIDs temporales si ya no existe pendiente de registro
     if (item.userId.startsWith("temp_")) {
-      // permitir solo si aún existe registro pendiente
       const pending = await AsyncStorage.getItem(
         "@lifereminder/auth/pending_registrations"
       );
 
       if (!pending) {
-        // tempUid sin pendiente → eliminar
         currentQueue = currentQueue.filter((q) => q.id !== item.id);
         await saveQueue(currentQueue);
       }
+      continue;
+    }
 
+
+    if (_currentValidUserId && item.userId !== _currentValidUserId) {
       continue;
     }
 
@@ -461,6 +419,7 @@ async function retryFailed(): Promise<void> {
     }
     return item;
   });
+
   await saveQueue(updatedQueue);
 
   if (isOnline) {
@@ -477,7 +436,9 @@ async function forceSync(): Promise<{ success: number; failed: number }> {
   return processQueue();
 }
 
-//              CACHE MANAGEMENT
+// ============================================================
+//              CACHE MANAGEMENT (MULTI-UID permitido)
+// ============================================================
 
 async function saveToCache(
   collectionName: string,
@@ -485,11 +446,6 @@ async function saveToCache(
   remoteData: Array<Record<string, any>>
 ): Promise<void> {
   try {
-    // solo permitir cachear para el UID válido actual
-    if (_currentValidUserId && userId !== _currentValidUserId) {
-      return;
-    }
-
     const dataWithIds = remoteData.filter(
       (item): item is Record<string, any> & { id: string } =>
         typeof item?.id === "string" && item.id.length > 0
@@ -525,6 +481,7 @@ async function saveToCache(
       "snoozeCount",
       "snoozedUntil",
       "lastSnoozeAt",
+      "lastSnoozeAt",
     ];
 
     for (const item of dataWithIds) {
@@ -536,7 +493,6 @@ async function saveToCache(
       }
 
       const localItem = currentData.find((d: any) => d.id === item.id);
-
       let mergedItem: Record<string, any> = { ...item };
 
       if (pendingOp?.type === "UPDATE") {
@@ -598,39 +554,28 @@ async function getFromCache<T = any>(
   userId: string
 ): Promise<{ data: T[]; timestamp: number } | null> {
   try {
-    // Verificar que el userId solicitado es el actual
-    if (_currentValidUserId && userId !== _currentValidUserId) {
-      // Retornar vacío para evitar cargar datos incorrectos
-      return null;
-    }
-
     const key = getCacheKey(collectionName, userId);
     const cached = await AsyncStorage.getItem(key);
 
-    if (cached) {
-      const parsed = JSON.parse(cached) as CachedCollection;
+    if (!cached) return null;
 
-      // Verificar que los datos tienen el userId correcto
-      if (parsed.data && Array.isArray(parsed.data)) {
-        // Verificar que los items pertenecen al usuario correcto
-        const hasWrongUserId = parsed.data.some((item: any) => {
-          if (item.userId && item.userId !== userId) {
-            return true;
-          }
-          return false;
-        });
+    const parsed = JSON.parse(cached) as CachedCollection;
 
-        if (hasWrongUserId) {
-          await AsyncStorage.removeItem(key);
-          return null;
-        }
+    // Si en tu data guardas item.userId y está mal, limpia esa cache corrupta
+    if (parsed.data && Array.isArray(parsed.data)) {
+      const hasWrongUserId = parsed.data.some((item: any) => {
+        if (item?.userId && item.userId !== userId) return true;
+        return false;
+      });
+
+      if (hasWrongUserId) {
+        await AsyncStorage.removeItem(key);
+        return null;
       }
-
-      return { data: parsed.data as T[], timestamp: parsed.cachedAt };
     }
 
-    return null;
-  } catch (error) {
+    return { data: parsed.data as T[], timestamp: parsed.cachedAt };
+  } catch {
     return null;
   }
 }
@@ -641,14 +586,7 @@ async function addItemToCache(
   item: Record<string, any>
 ): Promise<void> {
   try {
-    // VALIDACIÓN: No agregar items de otro usuario
-    if (!validateUserId(userId, "addItemToCache")) {
-      return;
-    }
-
-    if (!item.id) {
-      return;
-    }
+    if (!item.id) return;
 
     item = normalizeForStorage(item);
 
@@ -671,8 +609,11 @@ async function addItemToCache(
       cachedAt: Date.now(),
       lastSyncedAt: Date.now(),
     };
+
     await AsyncStorage.setItem(key, JSON.stringify(cacheData));
-  } catch (error) {}
+  } catch {
+    // silencioso
+  }
 }
 
 async function updateItemInCache(
@@ -694,7 +635,6 @@ async function updateItemInCache(
         lastSyncedAt: Date.now(),
       };
       await AsyncStorage.setItem(key, JSON.stringify(cacheData));
-
       return;
     }
 
@@ -703,11 +643,10 @@ async function updateItemInCache(
     let updatedData: Array<Record<string, any>>;
     if (itemIndex >= 0) {
       updatedData = [...cached.data];
-      updatedData[itemIndex] = {
+      updatedData[itemIndex] = normalizeForStorage({
         ...updatedData[itemIndex],
         ...updates,
-      };
-      updatedData[itemIndex] = normalizeForStorage(updatedData[itemIndex]);
+      });
     } else {
       updatedData = [
         ...cached.data,
@@ -722,7 +661,9 @@ async function updateItemInCache(
       lastSyncedAt: Date.now(),
     };
     await AsyncStorage.setItem(key, JSON.stringify(cacheData));
-  } catch (error) {}
+  } catch {
+    // silencioso
+  }
 }
 
 async function removeItemFromCache(
@@ -743,7 +684,9 @@ async function removeItemFromCache(
       lastSyncedAt: Date.now(),
     };
     await AsyncStorage.setItem(key, JSON.stringify(cacheData));
-  } catch (error) {}
+  } catch {
+    // silencioso
+  }
 }
 
 async function getItemFromCache(
@@ -756,7 +699,7 @@ async function getItemFromCache(
     if (!cached) return null;
 
     return (cached.data as any).find((item: any) => item.id === docId) || null;
-  } catch (error) {
+  } catch {
     return null;
   }
 }
@@ -768,7 +711,9 @@ async function clearCache(
   try {
     const key = getCacheKey(collectionName, userId);
     await AsyncStorage.removeItem(key);
-  } catch (error) {}
+  } catch {
+
+  }
 }
 
 async function clearAllUserCache(userId: string): Promise<void> {
@@ -781,7 +726,9 @@ async function clearAllUserCache(userId: string): Promise<void> {
     if (userCacheKeys.length > 0) {
       await AsyncStorage.multiRemove(userCacheKeys);
     }
-  } catch (error) {}
+  } catch {
+
+  }
 }
 
 /**
@@ -789,24 +736,22 @@ async function clearAllUserCache(userId: string): Promise<void> {
  */
 async function clearAllUserData(): Promise<void> {
   try {
-    console.log("🧹 clearAllUserData: Limpiando TODOS los datos");
-
-    // 1. Obtener TODAS las claves de AsyncStorage
+    // 1 Obtener TODAS las claves de AsyncStorage
     const allKeys = await AsyncStorage.getAllKeys();
 
-    // 2. Filtrar TODAS las claves de datos (@lifereminder/data)
-    const dataKeys = allKeys.filter(
-      (key) => key.startsWith(STORAGE_PREFIX) // "@lifereminder/data"
-    );
+    // 2 Filtrar TODAS las claves de datos (@lifereminder/data)
+    const dataKeys = allKeys.filter((key) => key.startsWith(STORAGE_PREFIX));
 
-    // 3. Eliminar TODAS las claves de datos
+    // 3 Eliminar TODAS las claves de datos
     if (dataKeys.length > 0) {
       await AsyncStorage.multiRemove(dataKeys);
     }
 
-    // 4. Limpiar la cola de sincronización
+    // 4 Limpiar la cola de sincronización
     await clearQueue();
-  } catch (error) {}
+  } catch {
+
+  }
 }
 
 async function hasCachedData(userId: string): Promise<boolean> {
@@ -823,32 +768,23 @@ async function hasCachedData(userId: string): Promise<boolean> {
 async function debugCache(userId: string): Promise<void> {
   try {
     for (const collectionName of AUTO_SYNC_COLLECTIONS) {
-      const cached = await getFromCache(collectionName, userId);
-      if (cached && cached.data.length > 0) {
-        const archivedCount = (cached.data as any).filter(
-          (item: any) => item.isArchived === true || !!item.archivedAt
-        ).length;
-        const activeCount = cached.data.length - archivedCount;
-      }
+      await getFromCache(collectionName, userId);
     }
+    await getQueue();
+  } catch {
 
-    const queue = await getQueue();
-    const userQueue = queue.filter((op) => op.userId === userId);
-  } catch (error) {}
+  }
 }
 
-//  MIGRAR NAMESPACE (tempUid -> realUid)
 
 async function migrateUserNamespace(
   oldUid: string,
   newUid: string
 ): Promise<void> {
-  if (!oldUid || !newUid || oldUid === newUid) {
-    return;
-  }
+  if (!oldUid || !newUid || oldUid === newUid) return;
 
   try {
-    // 1️ Migrar keys de AsyncStorage
+    // 1 Migrar keys de AsyncStorage
     const allKeys = await AsyncStorage.getAllKeys();
     const oldPrefix = `${STORAGE_PREFIX}/${oldUid}/`;
     const oldKeys = allKeys.filter((k) => k.startsWith(oldPrefix));
@@ -866,14 +802,10 @@ async function migrateUserNamespace(
       await AsyncStorage.removeItem(key);
     }
 
-    // 2️ Migrar cola de sincronización
+    // 2 Migrar cola de sincronización
     const queue = await getQueue();
-    const operationsToMigrate = queue.filter((item) => item.userId === oldUid);
-
     const updated = queue.map((item) => {
-      if (item.userId === oldUid) {
-        return { ...item, userId: newUid };
-      }
+      if (item.userId === oldUid) return { ...item, userId: newUid };
       return item;
     });
 
@@ -883,16 +815,10 @@ async function migrateUserNamespace(
   }
 }
 
-//    SINCRONIZACIÓN
-
 async function syncCollection(
   collectionName: string,
   userId: string
 ): Promise<any[]> {
-  if (_currentValidUserId && userId !== _currentValidUserId) {
-    return [];
-  }
-
   const netState = await NetInfo.fetch();
   isOnline =
     netState.isConnected === true && netState.isInternetReachable !== false;
@@ -906,16 +832,16 @@ async function syncCollection(
     const collRef = collection(db, "users", userId, collectionName);
     const snapshot = await getDocs(collRef);
 
-    const data = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
+    const data = snapshot.docs.map((d) => ({
+      id: d.id,
+      ...d.data(),
     }));
 
     await saveToCache(collectionName, userId, data);
 
     const cached = await getFromCache(collectionName, userId);
     return cached?.data || data;
-  } catch (error) {
+  } catch {
     const cached = await getFromCache(collectionName, userId);
     return cached?.data || [];
   }
@@ -926,8 +852,6 @@ async function syncAllCollections(userId: string): Promise<void> {
     await syncCollection(collectionName, userId);
   }
 }
-
-//    ALIASES PARA COMPATIBILIDAD
 
 const saveLocalData = async (
   collectionName: string,
@@ -966,7 +890,6 @@ const updateCacheItem = updateItemInCache;
 const deleteCacheItem = removeItemFromCache;
 const addToCacheItem = addItemToCache;
 
-//                    UTILIDADES
 
 async function hasPendingOperations(
   collectionName: string,
@@ -994,9 +917,7 @@ async function getExcludedIds(
     if (op.collection !== collectionName || op.userId !== userId) return;
     if (op.status !== "PENDING" && op.status !== "FAILED") return;
 
-    if (op.type === "DELETE") {
-      excluded.add(op.documentId);
-    }
+    if (op.type === "DELETE") excluded.add(op.documentId);
   });
 
   return excluded;
@@ -1033,10 +954,6 @@ async function getActiveItems(
   collectionName: string,
   userId: string
 ): Promise<Record<string, any>[]> {
-  if (_currentValidUserId && userId !== _currentValidUserId) {
-    return [];
-  }
-
   const cached = await getFromCache(collectionName, userId);
   if (!cached?.data) return [];
 
@@ -1058,9 +975,9 @@ async function getArchivedItems(
   const cached = await getFromCache(collectionName, userId);
   if (!cached?.data) return [];
 
-  return cached.data.filter((item: any) => {
-    return item.isArchived === true || !!item.archivedAt;
-  });
+  return cached.data.filter(
+    (item: any) => item.isArchived === true || !!item.archivedAt
+  );
 }
 
 function getIsOnline(): boolean {
@@ -1073,7 +990,7 @@ async function checkConnection(): Promise<boolean> {
   return isOnline;
 }
 
-//                    EXPORT
+
 
 export const syncQueueService = {
   initialize,
@@ -1099,6 +1016,7 @@ export const syncQueueService = {
   clearCache,
   clearAllUserCache,
   clearAllUserData,
+
   setCurrentValidUserId,
   getCurrentValidUserId,
 

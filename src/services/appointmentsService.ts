@@ -4,6 +4,9 @@ import { db } from "../config/firebaseConfig";
 import { collection, onSnapshot, query, orderBy } from "firebase/firestore";
 import { syncQueueService } from "./offline/SyncQueueService";
 import { offlineAuthService } from "./offline/OfflineAuthService";
+import NetInfo from "@react-native-community/netinfo";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { getDocs } from "firebase/firestore";
 // ============================================================
 //                    TIPOS DE CITA
 // ============================================================
@@ -24,19 +27,86 @@ export interface Appointment {
 // ============================================================
 //                    FUNCIONES CRUD
 // ============================================================
+export async function getAppointmentsForCaregiver(
+  userId: string,
+  loggedUserId: string
+): Promise<Appointment[]> {
+  // Si es el propio usuario, usar método normal
+  if (userId === loggedUserId) {
+    return loadLocalAppointments(userId);
+  }
+
+  // Para cuidadores: intentar cache primero, luego Firestore
+  try {
+    // Intentar desde cache
+    const cached = await syncQueueService.getFromCache("appointments", userId);
+
+    if (cached && cached.data && cached.data.length > 0) {
+      const activeItems = cached.data.filter((item: any) => {
+        return !(item.isArchived === true || !!item.archivedAt);
+      });
+      return activeItems as Appointment[];
+    }
+
+    // Si no hay cache, leer directamente de Firestore
+
+    const netState = await NetInfo.fetch();
+    const isOnline =
+      netState.isConnected === true && netState.isInternetReachable !== false;
+
+    if (!isOnline) {
+      return [];
+    }
+
+    const apptsRef = collection(db, "users", userId, "appointments");
+    const q = query(apptsRef, orderBy("date", "asc"));
+    const snapshot = await getDocs(q);
+
+    const appointments = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    })) as Appointment[];
+
+    // Guardar en cache temporal para futuras consultas
+    try {
+      const currentValidUid = syncQueueService.getCurrentValidUserId();
+
+      if (currentValidUid && currentValidUid === userId) {
+        await syncQueueService.saveToCache(
+          "appointments",
+          userId,
+          appointments
+        );
+      }
+    } catch (cacheError) {}
+
+    return appointments.filter((a) => !a.isArchived);
+  } catch (error) {
+    return [];
+  }
+}
+
+// src/services/appointmentsService.ts
 
 export async function createAppointment(
-  userId: string,
+  userId: string | null | undefined,
   data: Appointment,
   forcedId?: string
 ): Promise<string> {
   const validUid = syncQueueService.getCurrentValidUserId();
-  if (!validUid || validUid !== userId) {
-    return "";
+  const finalUid = userId ?? validUid;
+
+  if (!finalUid) {
+    throw new Error("No hay usuario válido para crear cita (offline/online).");
+  }
+
+  // si ya hay validUid establecido, exige consistencia
+  if (validUid && finalUid !== validUid) {
+    throw new Error("UID inválido para crear cita.");
   }
 
   const tempId =
-    forcedId ?? `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    forcedId ?? `temp_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
   const appointmentData = {
     ...data,
@@ -50,7 +120,7 @@ export async function createAppointment(
     "CREATE",
     "appointments",
     tempId,
-    userId,
+    finalUid,
     appointmentData as any
   );
 
@@ -58,12 +128,20 @@ export async function createAppointment(
 }
 
 export async function updateAppointment(
-  userId: string,
+  userId: string | null | undefined,
   appointmentId: string,
   data: Partial<Appointment>
 ): Promise<void> {
   const validUid = syncQueueService.getCurrentValidUserId();
-  if (!validUid || validUid !== userId) return;
+  const finalUid = userId ?? validUid;
+
+  if (!finalUid) {
+    throw new Error("No hay usuario válido para actualizar cita.");
+  }
+
+  if (validUid && finalUid !== validUid) {
+    throw new Error("UID inválido para actualizar cita.");
+  }
 
   const updateData = {
     ...data,
@@ -74,7 +152,7 @@ export async function updateAppointment(
     "UPDATE",
     "appointments",
     appointmentId,
-    userId,
+    finalUid,
     updateData as any
   );
 }
@@ -233,4 +311,5 @@ export default {
   deleteAppointment,
   listenAppointments,
   getAppointmentById,
+  getAppointmentsForCaregiver,
 };

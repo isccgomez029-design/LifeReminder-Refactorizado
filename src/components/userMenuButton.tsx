@@ -49,7 +49,7 @@ export default function UserMenuButton() {
     setOpen(false);
     try {
       // 🔒 Cierra sesión (offline-first)
-      await offlineAuthService.signOut(false);
+      await offlineAuthService.signOut();
 
       // 🔥 RESET REAL DE LA UI
       navigation.reset({
@@ -75,7 +75,7 @@ export default function UserMenuButton() {
           onPress: async () => {
             setOpen(false);
             try {
-              await offlineAuthService.signOut(true);
+              await offlineAuthService.signOut();
 
               // 🔥 RESET REAL DE LA UI
               navigation.reset({

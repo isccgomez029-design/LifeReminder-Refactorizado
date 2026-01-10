@@ -2,7 +2,7 @@
 import * as ImagePicker from "expo-image-picker";
 import { Alert } from "react-native";
 
-/** Seleccionar desde galería: devuelve uri o null */
+
 export async function pickImageFromGallery(): Promise<string | null> {
   try {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -33,7 +33,6 @@ export async function pickImageFromGallery(): Promise<string | null> {
   }
 }
 
-/** Tomar foto con la cámara: devuelve uri o null */
 export async function takePhotoWithCamera(): Promise<string | null> {
   try {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
