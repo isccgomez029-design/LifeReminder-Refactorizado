@@ -60,7 +60,7 @@ export interface SyncResult {
   error?: string;
 }
 
-// ESTADO INTERNO
+
 let isOnline = true;
 let isProcessing = false;
 let lastSyncTime: Date | null = null;
@@ -76,7 +76,7 @@ const AUTO_SYNC_COLLECTIONS = [
   "history",
 ];
 
-//    UID ACTUAL (solo para procesar cola, NO para cache)
+//    UID ACTUAL 
 
 let _currentValidUserId: string | null = null;
 

@@ -6,11 +6,9 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import * as Notifications from "expo-notifications";
 import NetInfo from "@react-native-community/netinfo";
 
-// 🔀 Stacks
 import { AuthStack, AppStack } from "./src/navigation/StackNavigator";
 import { navigationRef } from "./src/navigation/navigationRef";
 
-// 🔔 Servicios
 import { configureNotificationPermissions } from "./src/services/Notifications";
 import {
   offlineAuthService,
@@ -19,10 +17,9 @@ import {
 import { syncQueueService } from "./src/services/offline/SyncQueueService";
 import { offlineAlarmService } from "./src/services/offline/OfflineAlarmService";
 
-// 🌐 Contexto
+
 import { OfflineProvider } from "./src/context/OfflineContext";
 
-// ⏰ Alarmas
 import {
   shouldShowAlarm,
   performAlarmMaintenance,
@@ -50,35 +47,35 @@ export default function App() {
 
     const initializeApp = async () => {
       try {
-        // 1️⃣ Permisos de notificaciones
+        // 1 Permisos de notificaciones
         await configureNotificationPermissions();
 
-        // 2️⃣ Inicializar auth offline-first
+        //  Inicializar auth offline-first
         await offlineAuthService.initialize();
 
-        // 3️⃣ Listener reactivo de sesión (CLAVE)
+        //  Listener reactivo de sesión 
         unsubscribeAuth = offlineAuthService.addAuthStateListener((u) => {
           if (!isMounted) return;
           setUser(u);
           setAuthReady(true);
         });
 
-        // 4️⃣ Inicializar cola offline
+        // 4️ Inicializar cola offline
         await syncQueueService.initialize();
 
-        // 5️⃣ Inicializar alarmas offline
+        //  Inicializar alarmas offline
         await offlineAlarmService.initialize();
 
-        // 6️⃣ Mantenimiento de alarmas
+        //  Mantenimiento de alarmas
         await performAlarmMaintenance();
 
-        // 7️⃣ Limpieza de alarmas huérfanas
+        //  Limpieza de alarmas huérfanas
         const uid = offlineAuthService.getCurrentUid();
         if (uid) {
           await cleanupArchivedItemAlarms(uid);
         }
 
-        // 8️⃣ Forzar evaluación inicial de red
+        //  Forzar evaluación inicial de red
         await NetInfo.fetch();
 
         if (isMounted) setIsInitializing(false);

@@ -124,7 +124,7 @@ function isNetOnline(state: {
 
 let cachedUidSync: string | null = null;
 
-//              CLASE PRINCIPAL: OfflineAuthService
+
 
 export class OfflineAuthService {
   private currentUser: CachedUser | null = null;
@@ -137,7 +137,7 @@ export class OfflineAuthService {
   private initializationPromise: Promise<CachedUser | null> | null = null;
   private isFinalizingPending: boolean = false;
 
-  // ==================== INICIALIZACIÓN ====================
+  // INICIALIZACIÓN 
 
   async initialize(): Promise<CachedUser | null> {
     if (this.initializationPromise) return this.initializationPromise;
@@ -153,7 +153,7 @@ export class OfflineAuthService {
         await AsyncStorage.multiRemove(profileKeys);
       }
     } catch {
-      // no-op
+
     }
   }
 
@@ -395,7 +395,6 @@ export class OfflineAuthService {
     return { ok: true };
   }
 
-  //  Agregar a cola en lugar de sobrescribir
   async registerOfflinePending(params: {
     email: string;
     password: string;
@@ -580,7 +579,7 @@ export class OfflineAuthService {
         }
       }
 
-      // 1️ Crear usuario REAL en Firebase
+      // 1️ Crear usuario  en Firebase
 
       const cred = await createUserWithEmailAndPassword(
         auth,
@@ -602,15 +601,15 @@ export class OfflineAuthService {
       const realUid = cred.user.uid;
       const oldUid = pending.tempUid;
 
-      // 2️⃣ Migrar TODO el namespace offline (meds, habits, queue, etc.)
+      //  Migrar  el namespace offline 
 
       await syncQueueService.migrateUserNamespace(oldUid, realUid);
 
-      // 3️ Cachear usuario base y perfil
+      // Cachear usuario base y perfil
       await this.cacheUserFromFirebase(cred.user);
       await this.cacheUserProfile(realUid);
 
-      // 4️ Obtener usuario FINAL desde cache
+      //  Obtener usuario FINAL desde cache
       const email = pending.email.toLowerCase();
       const cachedUser = await this.getCachedUser(email);
 
@@ -625,14 +624,14 @@ export class OfflineAuthService {
         this.notifyAuthStateListeners(cachedUser);
       }
 
-      // 5️ Persistir credenciales para futuros logins offline
+      //  Persistir credenciales para futuros logins offline
       await this.cacheCredentials(pending.email, pending.password);
       await AsyncStorage.setItem(
         plaintextKey(pending.email),
         JSON.stringify({ email: pending.email, password: pending.password })
       );
 
-      // 6️ Eliminar este registro de la cola
+      // Eliminar este registro de la cola
       await this.removePendingRegistration(pending.tempUid);
     } catch (err: any) {
       const code = err?.code || "";
@@ -648,7 +647,7 @@ export class OfflineAuthService {
     }
   }
 
-  // ==================== AUTENTICACIÓN ====================
+  //  AUTENTICACIÓN 
 
   async persistOfflineLoginAfterRegister(email: string, password: string) {
     const e = email.trim().toLowerCase();
@@ -887,7 +886,7 @@ export class OfflineAuthService {
     }
   }
 
-  // ==================== FIREBASE RESTORE ====================
+  //  FIREBASE RESTORE 
 
   private async attemptFirebaseRestore(): Promise<void> {
     try {
@@ -938,7 +937,7 @@ export class OfflineAuthService {
     } catch (error) {}
   }
 
-  // ==================== CACHÉ DE USUARIO ====================
+  //  CACHÉ DE USUARIO 
 
   private async cacheUserFromFirebase(user: User): Promise<void> {
     try {
@@ -1023,7 +1022,7 @@ export class OfflineAuthService {
     }
   }
 
-  // ==================== CACHÉ DE CREDENCIALES ====================
+  //  CACHÉ DE CREDENCIALES 
 
   private async cacheCredentials(
     email: string,
@@ -1083,7 +1082,7 @@ export class OfflineAuthService {
     } catch (error) {}
   }
 
-  // ==================== SESIÓN ====================
+  //  SESIÓN 
 
   private async restoreSession(): Promise<CachedUser | null> {
     const email = await AsyncStorage.getItem(STORAGE_KEYS.LAST_USER_EMAIL);
@@ -1129,7 +1128,7 @@ export class OfflineAuthService {
         return;
       }
 
-      //  UID coincide → sincronizar con seguridad
+      // si  UID coincide se  sincronizar con seguridad
       if (auth.currentUser && auth.currentUser.uid === offlineUid) {
         await auth.currentUser.reload();
         await this.cacheUserFromFirebase(auth.currentUser);
@@ -1186,7 +1185,7 @@ export class OfflineAuthService {
       return validUid;
     }
 
-    //   Usuario offline en memoria (controlado por OfflineAuthService)
+    //   Usuario offline en memoria 
     if (this.currentUser?.uid) {
       return this.currentUser.uid;
     }
